@@ -4,8 +4,10 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
@@ -71,6 +73,18 @@ func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, changes chan<-
 				announce("info", "Softafrique Backup Agent service stopping")
 				cancel()
 				changes <- svc.Status{State: svc.StopPending}
+				// Give the loop a moment to unwind: cancelling the context
+				// stops the current restic run, and the agent still has a
+				// status file to write on the way out. Exiting the handler
+				// immediately would let the SCM kill the process mid-write.
+				select {
+				case err := <-done:
+					if err != nil && !errors.Is(err, context.Canceled) {
+						announce("warning", fmt.Sprintf("backup loop stopped with: %v", err))
+					}
+				case <-time.After(30 * time.Second):
+					announce("warning", "backup loop did not stop within 30s; exiting anyway")
+				}
 				return false, 0
 			}
 		case err := <-done:

@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
+  WixToolset.Util, no v3 compatibility layer).
+
+  Build:
+    wix build installer/Product.wxs -arch x64 \
+      -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
+      -bindpath build/bin/ -o SoftafriqueBackupAgent.msi
+
+  Deploy:
+    msiexec /i SoftafriqueBackupAgent.msi /qn BACKUPPATH="D:\CustomerData"
+    msiexec /i SoftafriqueBackupAgent.msi /qn TESTINSTALL=1   (CI smoke test)
+
+  Design decisions, and the finding each one answers:
+
+  * The agent runs as a Windows service as LocalSystem, because it has to back
+    up when nobody is signed in. The SCM starts the exe with no arguments, which
+    is why `agent` with no arguments means service mode.
+
+  * State lives in %ProgramData%\SoftafriqueBackupAgent, not beside the exe.
+    The credentials blob is DPAPI-sealed, but DPAPI only stops *other users*:
+    anything running as SYSTEM or an administrator can still decrypt it. The
+    thing that actually protects the customer's key is that directory's ACL,
+    which this package sets explicitly rather than inheriting whatever
+    %ProgramData% happens to allow.
+
+  * The enrollment token is never an MSI property and never appears on a command
+    line. The RMM writes it to a file with a tight ACL, passes the *path* as
+    ENROLLTOKENFILE, and the agent deletes the file once the token is consumed.
+    An MSI property would be written to the MSI log; a command line would be
+    readable from the process table by every process on the machine.
+
+  * The pilot is unsigned. Signing is a separate gate, documented in
+    docs/OPERATIONS.md.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="Softafrique Backup Agent"
+           Manufacturer="Softafrique"
+           Version="0.2.0.0"
+           UpgradeCode="6C7A1F52-9E4B-4E2C-9C1F-2D8A5B7E0F34"
+           Scope="perMachine"
+           Compressed="yes"
+           InstallerVersion="500">
+
+    <SummaryInformation Description="Encrypted, append-only backups to backup.softafrique.net" />
+
+    <!-- A major upgrade replaces the binaries but leaves the sealed credentials
+         in ProgramData alone, so a patch never leaves a working device
+         unenrolled and unprotected. The new version reads the existing blob. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of the Softafrique Backup Agent is already installed. Remove it first." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Softafrique Backup Agent" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATAFOLDER" Name="SoftafriqueBackupAgent" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="AgentExe" Guid="1E4C2A80-9B3D-4F51-8A67-2C0D9E5B7A11">
+        <File Id="AgentExeFile"
+              Name="SoftafriqueBackupAgent.exe"
+              Source="$(var.BindPath)\SoftafriqueBackupAgent.exe"
+              KeyPath="yes" />
+      </Component>
+
+      <Component Id="ResticExe" Guid="2F5D3B91-0C4E-4A62-9B78-3D1E0F6C8B22">
+        <File Id="ResticExeFile"
+              Name="restic.exe"
+              Source="$(var.BindPath)\restic.exe"
+              KeyPath="yes" />
+      </Component>
+
+      <!-- The path validation helper, kept as its own component so a technician
+           can also run it by hand to test a candidate folder. -->
+      <Component Id="ValidatePathExe" Guid="3A6E4CA2-1D5F-4B73-8C89-4E2F1A7D9C33">
+        <File Id="ValidatePathExeFile"
+              Name="validatepath.exe"
+              Source="$(var.BindPath)\validatepath.exe"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Softafrique Backup Agent" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="AgentService" />
+      <ComponentRef Id="DataFolderAcl" />
+      <ComponentRef Id="ConfigFile" />
+    </Feature>
+
+    <!-- ================= service ================= -->
+    <Component Id="AgentService" Guid="4B7F5DB5-2E60-4C84-9D90-5F3A2B8EAD44" Directory="INSTALLFOLDER">
+      <ServiceInstall Id="AgentServiceInstall"
+                      Name="SoftafriqueBackupAgent"
+                      DisplayName="Softafrique Backup Agent"
+                      Description="Backs up customer folders to backup.softafrique.net. Append-only: it cannot delete snapshots."
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="LocalSystem"
+                      Vital="yes">
+        <util:ServiceConfig FirstFailureActionType="restart"
+                            SecondFailureActionType="restart"
+                            ThirdFailureActionType="none"
+                            RestartServiceDelayInSeconds="60"
+                            ResetPeriodInDays="1"
+                            FailureActionsOnNonCrashFailures="no" />
+      </ServiceInstall>
+
+      <!-- Start is deliberately not set. InstallServices would start the
+           service before the RMM script has enrolled the device, and the first
+           scheduled run would then fail with "not enrolled". The RMM script
+           starts the service itself once enrollment has succeeded, and the
+           token-file path starts it from the InstallExecuteSequence below. -->
+      <ServiceControl Id="AgentServiceControl"
+                      Name="SoftafriqueBackupAgent"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+
+      <!-- Delayed auto-start. A backup agent that competes with everything else
+           in the first seconds after boot makes the boot slower for no benefit;
+           it only needs to be up within a minute or so. ServiceInstall has no
+           attribute for this, so the value the SCM reads is written directly,
+           under the service's own key rather than the app key above. -->
+      <RegistryValue Root="HKLM"
+                     Key="SYSTEM\CurrentControlSet\Services\SoftafriqueBackupAgent"
+                     Name="DelayedAutoStart"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- ============== data directory and its ACL ============== -->
+    <!--
+      SYSTEM and Administrators only, inheritance switched off.
+
+      An earlier draft granted Users read access here, on the theory that a
+      monitoring agent could then read status.json. That does not work: a
+      non-inheritable ACE on a directory applies to the directory itself, so
+      Users could list the folder but not open anything in it, while the
+      credentials blob sat in the same tree the moment before. The only
+      supported way to build a DACL from Go is to hand-assemble the ACL buffer,
+      which is not a risk worth taking in a backup agent, so the honest
+      arrangement is a locked directory and an elevated reader.
+
+      Consequence for monitoring: the Tactical RMM health check runs as SYSTEM
+      and is unaffected. A third-party monitor that runs as an ordinary user
+      cannot read status.json and must be given elevation, or an administrator
+      can copy the file out. See docs/OPERATIONS.md.
+    -->
+    <Component Id="DataFolderAcl" Guid="5C8A6EC4-3F71-4D95-8EA1-6A4B3C9FBE55" Directory="DATAFOLDER">
+      <CreateFolder>
+        <util:PermissionEx User="SYSTEM" GenericAll="yes" Inheritable="yes" />
+        <util:PermissionEx User="Administrators" GenericAll="yes" Inheritable="yes" />
+        <!-- PermissionEx writes to the LockPermissions table, which is only
+             applied if the component is keypath'd on the folder itself. -->
+        <RegistryKey Root="HKLM" Key="SOFTWARE\Softafrique\BackupAgent">
+          <RegistryValue Name="DataDir" Type="string" Value="[DATAFOLDER]" KeyPath="yes" />
+        </RegistryKey>
+      </CreateFolder>
+    </Component>
+
+    <!-- ================= configuration ================= -->
+    <!--
+      NeverOverwrite: a repair or an upgrade must not reset a config that a
+      technician edited on site, in particular a BACKUPPATH that was corrected
+      from what the RMM asked for. The template's placeholders are filled from
+      the properties below, so the installed file is always internally
+      consistent with where the files actually are.
+    -->
+    <Component Id="ConfigFile" Guid="6D9B7FD5-4A82-4EA6-9FB2-7B5C4DAF0C66" Directory="DATAFOLDER">
+      <util:ConfigurableTextFile Id="ConfigFileName"
+                                 Name="config.yaml"
+                                 Source="$(var.ProjectDir)\config.yaml.template"
+                                 Encoding="UTF-8"
+                                 NeverOverwrite="yes"
+                                 Configuration="DATADIR=[DATAFOLDER];STATUSFILE=[STATUSFILE];LOGFILE=[LOGFILE];BACKUPPATH=[BACKUPPATH]" />
+    </Component>
+
+    <!-- ================= properties ================= -->
+    <!-- The folder to protect. A deployment is expected to set this; the
+         default matches the agent's own platform default so a hand-typed
+         install still protects something real rather than a drive root. -->
+    <Property Id="BACKUPPATH" Value="C:\SoftafriqueBackup" />
+
+    <Property Id="STATUSFILE" Value="[DATAFOLDER]status.json" />
+    <Property Id="LOGFILE" Value="[DATAFOLDER]agent.log" />
+
+    <!-- The path to a one-time enrollment token written by the RMM. Only the
+         path travels through the MSI; the token itself is read and deleted by
+         the agent. -->
+    <Property Id="ENROLLTOKENFILE" />
+
+    <!-- Set on the CI smoke-test command line so nothing touches the service or
+         the network. -->
+    <Property Id="TESTINSTALL" Secure="yes" />
+
+    <Property Id="VALIDATEFOLDERCMD" Secure="yes" />
+    <Property Id="ENROLLCMD" Secure="yes" />
+    <Property Id="STARTSERVICECMD" Secure="yes" />
+
+    <SetProperty Id="VALIDATEFOLDERCMD" Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; &quot;[BACKUPPATH]&quot;"
+                 Before="ValidateBackupFolder" Sequence="execute" />
+    <SetProperty Id="ENROLLCMD"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; enroll -token-file &quot;[ENROLLTOKENFILE]&quot; -config &quot;[DATAFOLDER]config.yaml&quot;"
+                 Before="EnrollDevice" Sequence="execute" />
+    <SetProperty Id="STARTSERVICECMD" Value="&quot;[SystemFolder]sc.exe&quot; start &quot;SoftafriqueBackupAgent&quot;"
+                 Before="StartEnrolledService" Sequence="execute" />
+
+    <!-- ================= custom actions ================= -->
+    <!--
+      Both are Type 34/ deferred, run in the SYSTEM context and use
+      WixQuietExec, so a return code of 1 fails the install instead of being
+      logged and ignored. That matters: an install that "succeeded" while
+      enrollment failed would leave a machine that looks deployed and protects
+      nothing.
+    -->
+    <CustomAction Id="ValidateBackupFolder"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
+    <CustomAction Id="EnrollDevice"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
+    <!-- Only the token-file path starts the service here. The RMM script starts
+         it itself after enrolling, and a hand-typed install with no token
+         deliberately leaves it stopped for an operator to enroll first. -->
+    <CustomAction Id="StartEnrolledService"
+                  BinaryKey="WixCA"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+
+    <InstallExecuteSequence>
+      <Custom Action="ValidateBackupFolder" After="InstallFiles"
+              Condition="NOT TESTINSTALL AND NOT REMOVE" />
+
+      <!-- Enrollment happens after the service exists and the data directory is
+           locked down, and before the service starts, so the very first
+           scheduled run already has credentials. InstallServices is skipped on
+           this path because the service was never started. -->
+      <Custom Action="EnrollDevice" After="ValidateBackupFolder"
+              Before="StartServices"
+              Condition="NOT TESTINSTALL AND NOT REMOVE AND ENROLLTOKENFILE" />
+
+      <Custom Action="StartEnrolledService" After="StartServices"
+              Condition="NOT TESTINSTALL AND NOT REMOVE AND ENROLLTOKENFILE" />
+    </InstallExecuteSequence>
+
+    <!-- The folder check is deliberately absent from the UI sequence. It is a
+         deferred, SYSTEM-context action, and Windows Installer ignores a
+         deferred action scheduled from a UI sequence, so listing it here would
+         leave the interactive install doing nothing while appearing to validate.
+         A /qn install still runs it in the execute sequence above, which is the
+         path the RMM and CI both use. -->
+
+    <UIRef Id="WixUI_InstallDir" />
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+  </Package>
+</Wix>

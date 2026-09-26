@@ -45,9 +45,11 @@ restic_path: "restic"
 # deployment can be changed from the dashboard. Set it only to override the
 # gateway, e.g. when support has been asked to protect a second folder.
 #
-# include:
-#   - "C:\\CustomerData"
-include: []
+# On a device installed by the MSI this is the BACKUPPATH the deployment asked
+# for, so the agent protects the folder the technician chose even before the
+# dashboard has said anything.
+include:
+  - '[BACKUPPATH]'
 
 # Optional paths or globs to skip (restic's own syntax).
 exclude: []
@@ -84,15 +86,15 @@ status_heartbeat: 15m
 # The MSI creates this directory and restricts it to SYSTEM and Administrators.
 # That ACL is the real protection for the sealed key, so do not point this
 # somewhere else on a customer machine: the agent logs a warning if you do.
-data_dir: "C:\\ProgramData\\SoftafriqueBackupAgent"
+data_dir: '[DATADIR]'
 
 # Machine-readable state for Tactical RMM and dashboards. Contains no secrets:
 # the repository appears as a host name only.
-status_file: "C:\\ProgramData\\SoftafriqueBackupAgent\\status.json"
+status_file: '[STATUSFILE]'
 
 # Log destination. Every timestamp is UTC, so agent records line up with gateway
 # records across a DST change.
-log_file: "C:\\ProgramData\\SoftafriqueBackupAgent\\agent.log"
+log_file: '[LOGFILE]'
 
 # Periodic `restic stats` readings for the monitoring file. Off costs nothing
 # but the usage numbers in status.json.

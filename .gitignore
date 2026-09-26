@@ -12,6 +12,11 @@ credentials.dat
 repo.password
 config.yaml
 remote.json
+status.json
+
+# Rendering installer/config.yaml.template with the MSI's own Windows defaults
+# on a macOS or Linux box writes files whose names are literal Windows paths.
+C:\*
 
 # OS noise
 .DS_Store

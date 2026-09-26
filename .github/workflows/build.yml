@@ -1,0 +1,141 @@
+name: build
+
+# Every push is built and tested, and a tag produces the deployable artefacts.
+# The pilot ships unsigned, so the artefacts here are the unsigned ones; signing
+# is a separate, manual gate documented in docs/OPERATIONS.md.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.27"
+  RESTIC_VERSION: "0.19.1"
+
+jobs:
+  test:
+    name: test and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The Windows-only code paths (DPAPI, the named mutex, the service
+      # wrapper) are vetted with GOOS=windows on every change, because the
+      # build that ships is the Windows one and a broken GOOS=windows build
+      # should not wait for someone to run it by hand. The suite itself runs
+      # natively on Windows in the test-windows job.
+      - name: vet
+        run: |
+          go vet ./...
+          GOOS=windows GOARCH=amd64 go vet ./...
+          GOOS=windows GOARCH=arm64 go build ./...
+
+      - name: test
+        run: go test -race -coverprofile=coverage.out ./...
+
+  test-windows:
+    name: test on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The restic and secret packages have Windows-specific behaviour, so the
+      # suite is run natively rather than only cross-compiled.
+      - name: test
+        run: go test ./...
+
+  build:
+    name: build Windows binaries
+    runs-on: windows-latest
+    needs: [test, test-windows]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: build agent and validatepath
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p build/bin
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w -X main.Version=${VERSION}" \
+            -o build/bin/SoftafriqueBackupAgent.exe ./cmd/agent
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-s -w" \
+            -o build/bin/validatepath.exe ./cmd/validatepath
+
+      - name: fetch restic
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o restic.zip \
+            "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_windows_amd64.zip"
+          unzip -jo restic.zip "restic_*_windows_amd64.exe" -d build/bin
+          mv build/bin/restic_*_windows_amd64.exe build/bin/restic.exe
+          rm restic.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-binaries
+          path: build/bin/
+          retention-days: 30
+
+  msi:
+    name: build MSI
+    runs-on: windows-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download agent binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: agent-binaries
+          path: build/bin
+
+      - name: install WiX
+        run: dotnet tool install --global wix --version 5.0.2
+
+      - name: build MSI
+        # Util.wixext carries the service configuration elements in Product.wxs.
+        run: wix build installer/Product.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -bindpath build/bin/ -o SoftafriqueBackupAgent.msi
+
+      - name: smoke test the MSI layout
+        run: |
+          # An unsigned MSI still lays out and rolls back, which is what breaks
+          # most often in a WiX upgrade: a component with a stateful entry in
+          # the wrong order. This is the cheapest check that it installs at all.
+          msiexec /i SoftafriqueBackupAgent.msi /qn TESTINSTALL=1 /l*v msi.log
+          start-sleep -Seconds 3
+          if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe")) { throw "agent not installed" }
+          if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\validatepath.exe")) { throw "validatepath not installed" }
+          msiexec /x SoftafriqueBackupAgent.msi /qn
+          if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "agent not removed" }
+          Write-Host "MSI installs and uninstalls cleanly"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi
+          path: SoftafriqueBackupAgent.msi
+          retention-days: 90
