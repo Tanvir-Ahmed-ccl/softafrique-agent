@@ -1,0 +1,52 @@
+# Softafrique Backup Agent — example configuration.
+# Copy this to the agent's data directory and edit for each customer device.
+#
+#   Windows:  C:\ProgramData\SoftafriqueBackupAgent\config.yaml
+#   Linux/Mac (dev):  ~/.config/softafrique-backup-agent/config.yaml
+
+# Restic repository URL. {device_id} is replaced automatically with a stable
+# per-device id, so each customer gets its own repo on the server.
+# Example:  rest:https://backup.softafrique.net/repos/{device_id}
+repo: "rest:https://backup.softafrique.net/repos/{device_id}"
+
+# File containing the restic repo encryption password (AES-256). Create it with
+# 0600/chmod and keep it off the command line. If empty/absent on first run the
+# agent will ask about provisioning.
+password_file: "C:\\ProgramData\\SoftafriqueBackupAgent\\repo.password"
+
+# Path to restic. Leave as "restic" if it is on PATH or bundled next to the exe.
+restic_path: "restic"
+
+# Folders to protect. Use the real customer folder, e.g. server data shares.
+include:
+  - "C:\\SoftafriqueBackup"
+
+# Optional files/folders to skip (restic glob syntax).
+exclude: []
+
+# How often a full check / incremental backup runs. Restic always does
+# incremental backups on top of previous snapshots automatically.
+schedule_interval: 1h
+
+# Delay between retry attempts when a run fails (e.g. the PC was offline).
+retry_interval: 5m
+
+# Max retries per scheduled run. -1 = keep retrying until it succeeds.
+max_retries: -1
+
+# Random up-to-N delay before each run to spread load on the server.
+jitter: 30s
+
+# Agent state directory.
+data_dir: "C:\\ProgramData\\SoftafriqueBackupAgent"
+
+# Machine-readable state for monitoring (Tactical RMM, dashboards).
+status_file: "C:\\ProgramData\\SoftafriqueBackupAgent\\status.json"
+
+# Log destination.
+log_file: "C:\\ProgramData\\SoftafriqueBackupAgent\\agent.log"
+
+# TLS note: the server should enforce --append-only on rest-server so that a
+# compromised/ransomware-hit PC cannot delete its own backups. The agent never
+# runs forget/prune, so all history is retained until an admin cleans it up
+# with a maintenance credential from a trusted machine.

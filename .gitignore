@@ -1,0 +1,18 @@
+# Build output
+/build/
+
+# Local dev scratch
+*.tmp
+*.log
+
+# Credentials must never be committed. The real files live in ProgramData on
+# customer devices, but a developer machine or a CI runner can produce them in
+# the working tree too.
+credentials.dat
+repo.password
+config.yaml
+remote.json
+
+# OS noise
+.DS_Store
+Thumbs.db
