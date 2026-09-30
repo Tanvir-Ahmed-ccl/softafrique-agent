@@ -223,7 +223,7 @@
          as LocalSystem and reaches a share as the machine account, so
          \\FILESERVER\CustomerData can open fine for the technician who typed it
          and then fail every hourly backup because the machine account was never
-         granted access -- silently, with nothing in status.json to explain it.
+         granted access, silently, with nothing in status.json to explain it.
          A path that works interactively and dies quietly as a service is worse
          than a refused install, so allowing it is a decision somebody has to
          make on purpose.
@@ -308,9 +308,9 @@
     <!-- The check runs once, in the execute sequence, for every install mode:
          interactive, quiet and basic MSI alike. Windows Installer runs the UI
          sequence to completion and then runs the execute sequence, so listing
-         this action a second time in InstallUISequence would achieve nothing --
-         Windows Installer ignores a deferred action scheduled from a UI
-         sequence -- and would look as though the interactive install validated
+         this action a second time in InstallUISequence would achieve nothing,
+         because Windows Installer ignores a deferred action scheduled from a UI
+         sequence, and it would look as though the interactive install validated
          something twice.
 
          What an interactive install does not get is the reason. The check is
