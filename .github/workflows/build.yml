@@ -272,12 +272,12 @@ jobs:
             }
           }
           foreach ($q in @(
-            'SELECT Name FROM `_Tables` ORDER BY Name'
-            'SELECT * FROM `Service`'
-            'SELECT Service,Name,Component_ FROM `ServiceConfig`'
-            'SELECT Component,ComponentId,Directory_ FROM `Component`'
-            'SELECT * FROM `InstallExecuteSequence` WHERE `Action` = ''InstallServices'''
-            'SELECT * FROM `InstallExecuteSequence` WHERE `Action` = ''StartServices'''
+            'SELECT * FROM `ServiceInstall`'
+            'SELECT * FROM `ServiceControl`'
+            'SELECT * FROM `Wix4ServiceConfig`'
+            'SELECT * FROM `Component`'
+            'SELECT * FROM `FeatureComponents`'
+            'SELECT * FROM `InstallExecuteSequence`'
           )) {
             "QUERY: $q" | Tee-Object -FilePath $out -Append
             Invoke-MsiQuery $q | Tee-Object -FilePath $out -Append
