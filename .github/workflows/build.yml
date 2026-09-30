@@ -247,13 +247,44 @@ jobs:
           # An unsigned MSI still lays out and rolls back, which is what breaks
           # most often in a WiX upgrade: a component with a stateful entry in
           # the wrong order. This is the cheapest check that it installs at all.
-          msiexec /i SoftafriqueBackupAgent.msi /qn TESTINSTALL=1 /l*v msi.log
+          #
+          # msiexec's exit code is checked explicitly. Invoked bare from
+          # PowerShell a failed install does not raise, so the step used to
+          # carry on and then report "agent not installed", which says nothing
+          # about the install that actually failed.
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', 'SoftafriqueBackupAgent.msi', '/qn', 'TESTINSTALL=1', '/l*v', 'msi.log'
+          )
+          if ($p.ExitCode -ne 0) { throw "install exited $($p.ExitCode)" }
           start-sleep -Seconds 3
           if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe")) { throw "agent not installed" }
           if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\validatepath.exe")) { throw "validatepath not installed" }
-          msiexec /x SoftafriqueBackupAgent.msi /qn
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/x', 'SoftafriqueBackupAgent.msi', '/qn'
+          )
+          if ($p.ExitCode -ne 0) { throw "uninstall exited $($p.ExitCode)" }
           if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "agent not removed" }
           Write-Host "MSI installs and uninstalls cleanly"
+
+      # A failing install is only diagnosable from its own log, and the log is
+      # written into the workspace. Collected whatever the outcome, because the
+      # step that fails is not always the one that knows why.
+      - name: collect the MSI logs
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force -Path msilogs | Out-Null
+          Get-ChildItem -Filter '*.log' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(msi|repair|refused)\.log$' } |
+            ForEach-Object { Copy-Item $_.FullName "msilogs/$($_.Name)" }
+          Get-ChildItem msilogs | Select-Object Name, Length | Format-Table | Out-String | Write-Host
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: msi-logs
+          path: msilogs/
+          if-no-files-found: ignore
+          retention-days: 14
 
       # TESTINSTALL=1 skips the folder check, which means the check itself was
       # never exercised by the smoke test above -- and the folder check is the
