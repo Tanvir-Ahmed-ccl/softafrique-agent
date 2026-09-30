@@ -92,6 +92,7 @@
       <ComponentGroupRef Id="ProductComponents" />
       <ComponentRef Id="AgentService" />
       <ComponentRef Id="DataFolderAcl" />
+      <ComponentRef Id="DataFolderRegistry" />
       <ComponentRef Id="ConfigFile" />
     </Feature>
 
@@ -156,15 +157,23 @@
       can copy the file out. See docs/OPERATIONS.md.
     -->
     <Component Id="DataFolderAcl" Guid="5C8A6EC4-3F71-4D95-8EA1-6A4B3C9FBE55" Directory="DATAFOLDER">
-      <CreateFolder>
+      <!-- The folder is the keypath, and that is the whole point: PermissionEx
+           lands in the LockPermissions table, which Windows Installer only
+           applies to a component keypath'd on a file or directory. -->
+      <CreateFolder KeyPath="yes">
         <util:PermissionEx User="SYSTEM" GenericAll="yes" Inheritable="yes" />
         <util:PermissionEx User="Administrators" GenericAll="yes" Inheritable="yes" />
-        <!-- PermissionEx writes to the LockPermissions table, which is only
-             applied if the component is keypath'd on the folder itself. -->
-        <util:RegistryKey Root="HKLM" Key="SOFTWARE\Softafrique\BackupAgent">
-          <RegistryValue Name="DataDir" Type="string" Value="[DATAFOLDER]" KeyPath="yes" />
-        </util:RegistryKey>
       </CreateFolder>
+    </Component>
+
+    <!-- Kept as its own component rather than nested in the CreateFolder above.
+         In v5 RegistryKey is a child of Component, and sharing a component with
+         the folder would have meant the registry value won the keypath, which
+         silently stops the DACL above from being applied at all. -->
+    <Component Id="DataFolderRegistry" Guid="5C8A6EC4-3F71-4D95-8EA1-6A4B3C9FBE56" Directory="DATAFOLDER">
+      <util:RegistryKey Root="HKLM" Key="SOFTWARE\Softafrique\BackupAgent">
+        <RegistryValue Name="DataDir" Type="string" Value="[DATAFOLDER]" KeyPath="yes" />
+      </util:RegistryKey>
     </Component>
 
     <!-- ================= configuration ================= -->
