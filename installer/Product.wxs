@@ -65,11 +65,55 @@
     </StandardDirectory>
 
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <!-- The executable and the service are one component, and the executable
+           is its keypath. That is not tidiness: Windows Installer declined to
+           run InstallServices at all while the service lived in a component
+           keyed on a registry value, so the service was never created and
+           anything that expected it failed. A service keyed to the binary it
+           runs is also the arrangement Windows Installer's own service example
+           uses. -->
       <Component Id="AgentExe" Guid="1E4C2A80-9B3D-4F51-8A67-2C0D9E5B7A11">
         <File Id="AgentExeFile"
               Name="SoftafriqueBackupAgent.exe"
               Source="!(bindpath.bin)\SoftafriqueBackupAgent.exe"
               KeyPath="yes" />
+
+        <ServiceInstall Id="AgentServiceInstall"
+                        Name="SoftafriqueBackupAgent"
+                        DisplayName="Softafrique Backup Agent"
+                        Description="Backs up customer folders to backup.softafrique.net. Append-only: it cannot delete snapshots."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Account="LocalSystem">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="none"
+                              RestartServiceDelayInSeconds="60"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+
+        <!-- Start is deliberately not set. InstallServices would start the
+             service before the RMM script has enrolled the device, and the first
+             scheduled run would then fail with "not enrolled". The RMM script
+             starts the service itself once enrollment has succeeded, and the
+             token-file path starts it from the InstallExecuteSequence below. -->
+        <ServiceControl Id="AgentServiceControl"
+                        Name="SoftafriqueBackupAgent"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+
+        <!-- Delayed auto-start. A backup agent that competes with everything else
+             in the first seconds after boot makes the boot slower for no benefit;
+             it only needs to be up within a minute or so. ServiceInstall has no
+             attribute for this, so the value the SCM reads is written directly,
+             under the service's own key. -->
+        <RegistryValue Root="HKLM"
+                       Key="SYSTEM\CurrentControlSet\Services\SoftafriqueBackupAgent"
+                       Name="DelayedAutoStart"
+                       Type="integer"
+                       Value="1" />
       </Component>
 
       <Component Id="ResticExe" Guid="2F5D3B91-0C4E-4A62-9B78-3D1E0F6C8B22">
@@ -91,53 +135,10 @@
 
     <Feature Id="Main" Title="Softafrique Backup Agent" Level="1">
       <ComponentGroupRef Id="ProductComponents" />
-      <ComponentRef Id="AgentService" />
       <ComponentRef Id="DataFolderAcl" />
       <ComponentRef Id="DataFolderRegistry" />
       <ComponentRef Id="ConfigTemplate" />
     </Feature>
-
-    <!-- ================= service ================= -->
-    <Component Id="AgentService" Guid="4B7F5DB5-2E60-4C84-9D90-5F3A2B8EAD44" Directory="INSTALLFOLDER">
-      <ServiceInstall Id="AgentServiceInstall"
-                      Name="SoftafriqueBackupAgent"
-                      DisplayName="Softafrique Backup Agent"
-                      Description="Backs up customer folders to backup.softafrique.net. Append-only: it cannot delete snapshots."
-                      Type="ownProcess"
-                      Start="auto"
-                      ErrorControl="normal"
-                      Account="LocalSystem"
-                      Vital="yes">
-        <util:ServiceConfig FirstFailureActionType="restart"
-                            SecondFailureActionType="restart"
-                            ThirdFailureActionType="none"
-                            RestartServiceDelayInSeconds="60"
-                            ResetPeriodInDays="1" />
-      </ServiceInstall>
-
-      <!-- Start is deliberately not set. InstallServices would start the
-           service before the RMM script has enrolled the device, and the first
-           scheduled run would then fail with "not enrolled". The RMM script
-           starts the service itself once enrollment has succeeded, and the
-           token-file path starts it from the InstallExecuteSequence below. -->
-      <ServiceControl Id="AgentServiceControl"
-                      Name="SoftafriqueBackupAgent"
-                      Stop="both"
-                      Remove="uninstall"
-                      Wait="yes" />
-
-      <!-- Delayed auto-start. A backup agent that competes with everything else
-           in the first seconds after boot makes the boot slower for no benefit;
-           it only needs to be up within a minute or so. ServiceInstall has no
-           attribute for this, so the value the SCM reads is written directly,
-           under the service's own key rather than the app key above. -->
-      <RegistryValue Root="HKLM"
-                     Key="SYSTEM\CurrentControlSet\Services\SoftafriqueBackupAgent"
-                     Name="DelayedAutoStart"
-                     Type="integer"
-                     Value="1"
-                     KeyPath="yes" />
-    </Component>
 
     <!-- ============== data directory and its ACL ============== -->
     <!--
