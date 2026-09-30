@@ -151,7 +151,6 @@ func (a *Agent) load() error {
 		Repository: creds.Repository,
 		Host:       creds.DeviceID,
 		Password:   creds.ResticPassword(),
-		AllowInit:  a.cfg.AutoInit,
 		Logger:     a.log,
 	}
 	if a.cfg.PasswordFile != "" && a.cfg.DeviceID != "" {
@@ -408,11 +407,39 @@ func (a *Agent) backupOnce(ctx context.Context) (status.Outcome, error) {
 		return status.Outcome{Elapsed: time.Since(start), Skipped: true, Err: err}, scheduler.Terminal(err)
 	}
 
+	// A path the agent will not protect is refused here, before restic is given
+	// it, because that is the only point at which the agent is still the one
+	// deciding.
+	//
+	// The installer applies the same rule to what a technician typed. This catches
+	// what the gateway said instead, in a backup_path on /config or an enrollment
+	// reply, and it is deliberately terminal: retrying every five minutes against
+	// a share the machine account cannot read produces the same failure forever
+	// and buries it.
+	if refused := a.refusedPaths(paths); len(refused) > 0 {
+		err := refusalError(refused)
+		a.log.Error("backup withheld", "err", err)
+		return status.Outcome{Elapsed: time.Since(start), Skipped: true, Err: err}, scheduler.Terminal(err)
+	}
+
+	// The folder to protect is created if it has gone missing.
+	//
+	// Before this, a folder deleted after installation meant a device that
+	// reported a failed backup every hour, forever, until a human noticed. That
+	// is the worst of both worlds: the customer is not protected, and the only
+	// symptom is a red dashboard nobody reads.
+	//
+	// Recreating it and carrying on is right, but reporting a plain success
+	// would be a lie -- the snapshot would hold an empty directory. The paths
+	// created are carried into the Outcome so it is recorded as
+	// status.AttemptRecreated, which keeps last_success where it really was.
+	created := a.ensureBackupPaths(paths)
+
 	runner := a.resticRunner()
 	a.log.Info("starting backup", "paths", paths, "device_id", a.DeviceID())
 
 	res, err := runner.Backup(ctx, paths, a.cfg.Exclude)
-	outcome := status.Outcome{Elapsed: time.Since(start)}
+	outcome := status.Outcome{Elapsed: time.Since(start), RecreatedPaths: created}
 	if err != nil {
 		outcome.Err = err
 		return outcome, a.classifyBackupError(err)
@@ -505,7 +532,7 @@ func (a *Agent) reportStatus(ctx context.Context, outcome status.Outcome) {
 		AgentVersion:        a.Version,
 		OSCaption:           st.OSCaption,
 	}
-	if outcome.Err == nil {
+	if outcome.Err == nil && len(outcome.RecreatedPaths) == 0 {
 		rep.LastBackupStatus = "success"
 		if outcome.SnapshotID != "" {
 			rep.LastSnapshotID = outcome.SnapshotID
@@ -514,8 +541,16 @@ func (a *Agent) reportStatus(ctx context.Context, outcome status.Outcome) {
 			rep.BytesAdded = outcome.BytesAdded
 		}
 		rep.LastDurationSeconds = outcome.Elapsed.Seconds()
-	} else {
+	} else if outcome.Err != nil {
 		rep.LastBackupError = outcome.Err.Error()
+	} else {
+		// The attempt did not error, but the only reason it could run is that
+		// the agent created the folder itself, so the snapshot holds an empty
+		// directory. Reporting "success" here is how a device stops protecting a
+		// customer's data without the dashboard noticing, so the contract's
+		// two values leave "failed" with the reason as the honest answer.
+		rep.LastBackupError = "the protected folder was missing and had to be recreated, " +
+			"so this backup captured an empty folder: " + strings.Join(outcome.RecreatedPaths, ", ")
 	}
 
 	// A long backup must not leave the report hanging on the shutdown path.

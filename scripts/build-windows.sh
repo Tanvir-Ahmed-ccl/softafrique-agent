@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Builds SoftafriqueBackupAgent.exe (amd64 Windows) and bundles restic.exe
-# next to it so the agent needs no other dependencies on the customer PC.
+# Builds SoftafriqueBackupAgent.exe and validatepath.exe (amd64 Windows) and
+# bundles restic.exe next to them so the agent needs no other dependencies on the
+# customer PC.
+#
+# validatepath.exe is built here, not just in CI, because the MSI installs it and
+# the installer cannot work without it: it is what refuses a backup folder on
+# anything but a fixed disk, and it is what creates a missing one. A build script
+# that quietly left a stale copy in build/bin is a way to ship an installer that
+# enforces an older folder policy than the code does.
 #
 # Usage: scripts/build-windows.sh [version]
 set -euo pipefail
@@ -16,6 +23,16 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
   -ldflags "-s -w -X main.Version=${VERSION}" \
   -o "$OUT/SoftafriqueBackupAgent.exe" \
   "$ROOT/cmd/agent"
+
+# The helper the MSI calls to validate and create the folder to protect. Kept a
+# separate binary on purpose: it has to run during a managed install as the
+# installing user, from a deferred action, with no dependency on the agent's
+# runtime state.
+echo ">> Building validatepath.exe"
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-s -w" \
+  -o "$OUT/validatepath.exe" \
+  "$ROOT/cmd/validatepath"
 
 if [ ! -f "$OUT/restic.exe" ]; then
   echo ">> Fetching restic ${RESTIC_VERSION} for Windows (one time)"

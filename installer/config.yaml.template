@@ -100,11 +100,18 @@ log_file: '[LOGFILE]'
 # but the usage numbers in status.json.
 stats_enabled: true
 
-# Let the agent run `restic init` when the repository is missing. Leave this
-# off: the gateway creates the repository at enrollment, so an unexpected init
-# means the agent is looking at the wrong path and would create a second, empty
-# repository and split the customer's history in two.
-auto_init: false
+# Permit a network share (\\SERVER\Share) as the folder to protect. Leave this
+# off. The service runs as LocalSystem and reaches a share as the machine
+# account, so a folder that opened fine for the technician who set it up can
+# still fail every hourly backup because the machine account was never granted
+# access -- silently, with nothing in status.json to explain it. Only ever true
+# here because the deployment was made with install.ps1 -AllowUNC, which writes
+# this key; the MSI's own folder check is told separately, by ALLOWUNC=1.
+#
+# There is deliberately no equivalent switch for an optical or removable drive.
+# Those are refused outright: an ejected disc is not a misconfiguration to be
+# tolerated, it is a backup that quietly stops existing.
+allow_unc: false
 
 # Debug logging.
 verbose: false

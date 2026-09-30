@@ -88,7 +88,7 @@ func newTestAgentIn(t *testing.T, dir string, gw gateway, rest backupRunner) *Ag
 	cfg.StatusFile = filepath.Join(dir, "status.json")
 	cfg.LogFile = filepath.Join(dir, "agent.log")
 	cfg.Include = nil
-	cfg.AutoInit = false
+	cfg.AllowUNC = false
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func enrollTest(t *testing.T, a *Agent) {
 		EncryptionKey:  "encryption-key",
 		Repository:     "rest:https://backup.softafrique.net/dev-01HQ8",
 		Tenant:         "acme",
-		BackupPath:     "C:\\CustomerData",
+		BackupPath:     customerDataDir(t),
 		Server:         api.DefaultBaseURL,
 		EnrolledAt:     status.Now(),
 	}
@@ -120,6 +120,24 @@ func enrollTest(t *testing.T, a *Agent) {
 	if err := a.cfg.SecretStore().Save(creds); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// customerDataDir is a real, existing directory to stand in for the customer's
+// data folder.
+//
+// These tests used to use the literal string "C:\CustomerData", which is a
+// perfectly legal *filename* on macOS and Linux. Nothing created paths then, so
+// it was harmless; now that the agent recreates a protected folder that has gone
+// missing, a Windows-style fixture path became a real directory in the package
+// directory, committed or not. Fixtures that the production code creates things
+// from have to be real paths.
+func customerDataDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "CustomerData")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // An unenrolled device must not attempt a backup, and must not retry forever.
@@ -146,7 +164,7 @@ func TestSuspendedDeviceDoesNotBackUpAndIsNotRetried(t *testing.T) {
 	gw := &fakeGateway{config: &api.RemoteConfig{
 		DeviceID:   "dev-01HQ8",
 		Status:     api.StateSuspended,
-		BackupPath: "C:\\CustomerData",
+		BackupPath: customerDataDir(t),
 	}}
 	rest := &fakeRestic{}
 	a := newTestAgent(t, gw, rest)
@@ -250,7 +268,7 @@ func TestSuccessfulBackupIsReported(t *testing.T) {
 	gw := &fakeGateway{config: &api.RemoteConfig{
 		DeviceID:   "dev-01HQ8",
 		Status:     api.StateActive,
-		BackupPath: "C:\\CustomerData",
+		BackupPath: customerDataDir(t),
 	}}
 	rest := &fakeRestic{result: &restic.Result{
 		SnapshotID:   "abcdef123456",
@@ -439,7 +457,7 @@ func TestRemoteCacheSurvivesAReboot(t *testing.T) {
 	gw := &fakeGateway{config: &api.RemoteConfig{
 		DeviceID:         "dev-01HQ8",
 		Status:           api.StateActive,
-		BackupPath:       "C:\\CustomerData",
+		BackupPath:       customerDataDir(t),
 		ScheduleInterval: api.Duration(time.Hour),
 	}}
 	a := newTestAgent(t, gw, &fakeRestic{})
@@ -518,7 +536,7 @@ func TestHeartbeatDoesNotClaimSuccessBeforeAnyBackup(t *testing.T) {
 // or "failed", so the honest answer is to say nothing and let status.json carry
 // the reason.
 func TestSuspendedRunIsNotReportedAsAFailure(t *testing.T) {
-	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: `C:\Data`}}
+	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: customerDataDir(t)}}
 	a := newTestAgent(t, gw, &fakeRestic{})
 	enrollTest(t, a)
 
@@ -528,7 +546,7 @@ func TestSuspendedRunIsNotReportedAsAFailure(t *testing.T) {
 	}
 
 	// Now an operator suspends the device at the gateway.
-	gw.config = &api.RemoteConfig{Status: api.StateSuspended, BackupPath: `C:\Data`}
+	gw.config = &api.RemoteConfig{Status: api.StateSuspended, BackupPath: customerDataDir(t)}
 	if _, err := a.BackupNow(context.Background()); err == nil {
 		t.Fatal("expected an error")
 	}
@@ -557,7 +575,7 @@ func TestSuspendedRunIsNotReportedAsAFailure(t *testing.T) {
 // success while the device is suspended is the "always green" behaviour that
 // finding A was about.
 func TestHeartbeatDoesNotClaimSuccessWhileSuspended(t *testing.T) {
-	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: `C:\Data`}}
+	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: customerDataDir(t)}}
 	a := newTestAgent(t, gw, &fakeRestic{})
 	enrollTest(t, a)
 
@@ -568,7 +586,7 @@ func TestHeartbeatDoesNotClaimSuccessWhileSuspended(t *testing.T) {
 		t.Fatalf("report after a good run = %q, want success", got)
 	}
 
-	gw.config = &api.RemoteConfig{Status: api.StateSuspended, BackupPath: `C:\Data`}
+	gw.config = &api.RemoteConfig{Status: api.StateSuspended, BackupPath: customerDataDir(t)}
 	if _, err := a.BackupNow(context.Background()); err == nil {
 		t.Fatal("expected the suspended device to refuse")
 	}

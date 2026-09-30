@@ -16,6 +16,7 @@ package status
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,7 +40,23 @@ const (
 	// AttemptSuspended means the gateway withdrew the device, so no attempt was
 	// made. Distinct from failed: retrying will not help until an operator acts.
 	AttemptSuspended = "suspended"
+	// AttemptRecreated means the attempt succeeded, but only because the agent
+	// had to create the folder it was asked to protect. The snapshot therefore
+	// holds an empty directory and nothing else.
+	//
+	// It is a success in the narrow sense that nothing errored, and a lie in
+	// every sense that matters: reporting this as a plain success is how a device
+	// whose customer deleted their data folder reads as protected on a dashboard
+	// while protecting nothing. It is reported distinctly so the staleness of
+	// last_success still catches it.
+	AttemptRecreated = "recreated"
 )
+
+// recreateNoticePrefix marks an ActionRequired that this package wrote, so a
+// later clean run can clear its own notice without touching a "re-enroll" one
+// left by the gateway. The prefix is part of the value a monitoring script
+// reads, so it is short and stable.
+const recreateNoticePrefix = "the protected folder was missing"
 
 // RepoStats is the most recent repository usage reading.
 type RepoStats struct {
@@ -233,6 +250,11 @@ type Outcome struct {
 	// reporting a failure would make a deliberately suspended device look
 	// broken.
 	Skipped bool
+	// RecreatedPaths are folders the agent had to create because they had gone
+	// missing since the last run. Non-empty on an otherwise successful attempt
+	// means the snapshot protected an empty directory, which is recorded as
+	// AttemptRecreated rather than as a success.
+	RecreatedPaths []string
 	// Err is the failure, nil on success.
 	Err error
 }
@@ -276,6 +298,30 @@ func (s *Status) MarkFinished(end time.Time, out Outcome) {
 		return
 	}
 
+	// The agent had to create the folder it was asked to protect, so the
+	// snapshot that just succeeded holds an empty directory.
+	//
+	// This deliberately does NOT move LastSuccess, LastSnapshotID or the file
+	// counters. Those fields answer "when was this device last actually
+	// protected", and a snapshot of a directory the agent created thirty seconds
+	// earlier did not protect anything. Leaving them alone is what makes the
+	// health check's staleness threshold eventually fire and say so.
+	//
+	// It also deliberately does not increment ConsecutiveFailures. Nothing failed,
+	// and filling that counter with a non-failure would make it useless for the
+	// machines it exists to catch.
+	if len(out.RecreatedPaths) > 0 {
+		s.LastAttemptStatus = AttemptRecreated
+		s.LastAttemptError = recreateNotice(out.RecreatedPaths)
+		// The 0.1.0 compatibility mirror reads last_backup_status and nothing
+		// else. A 0.1.0-era monitor must not see "success" here.
+		s.LastBackupStatus = AttemptFailed
+		if s.ActionRequired == "" || isRecreateNotice(s.ActionRequired) {
+			s.ActionRequired = s.LastAttemptError
+		}
+		return
+	}
+
 	s.LastAttemptStatus = AttemptSuccess
 	s.LastAttemptError = ""
 	s.ConsecutiveFailures = 0
@@ -286,6 +332,36 @@ func (s *Status) MarkFinished(end time.Time, out Outcome) {
 	s.FilesChanged = out.FilesChanged
 	s.BytesAdded = out.BytesAdded
 	s.BackupCount++
+	// A clean run clears our own notice, and only ours: a pending "re-enroll"
+	// from the gateway is not ours to delete, and that one is cleared by
+	// clearAction once the gateway accepts the device again.
+	if isRecreateNotice(s.ActionRequired) {
+		s.ActionRequired = ""
+	}
+}
+
+// recreateNotice is the operator-facing text for a recreated folder. It names
+// the paths, because "something is wrong" is not actionable at 2am and a path is
+// the one thing that can be checked without a site visit.
+//
+// The path is quoted with plain double quotes rather than %q, because %q escapes
+// the backslashes in a Windows path and the reader then has to work out whether
+// they are real.
+func recreateNotice(paths []string) string {
+	quoted := make([]string, 0, len(paths))
+	for _, p := range paths {
+		quoted = append(quoted, `"`+p+`"`)
+	}
+	if len(quoted) == 1 {
+		return fmt.Sprintf("%s and has been created: %s. The backup that followed protected an empty folder, "+
+			"so confirm the customer's data is there", recreateNoticePrefix, quoted[0])
+	}
+	return fmt.Sprintf("%s and has been created: %s. The backup that followed protected empty folders, "+
+		"so confirm the customer's data is there", recreateNoticePrefix, strings.Join(quoted, ", "))
+}
+
+func isRecreateNotice(action string) bool {
+	return strings.HasPrefix(action, recreateNoticePrefix)
 }
 
 // errText renders an outcome error for the status file, tolerating a nil.

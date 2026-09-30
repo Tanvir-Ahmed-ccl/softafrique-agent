@@ -21,7 +21,16 @@
     download step into $env:ProgramFiles\Tactical RMM or a temp directory.
 
 .PARAMETER BackupPath
-    The customer folder to protect. Must already exist.
+    The customer folder to protect. Created if it is missing. Must be on a fixed
+    disk; a network share is refused unless -AllowUNC is given.
+
+.PARAMETER AllowUNC
+    Permit a network share as the folder to protect. Off by default, and there
+    is a reason. The service runs as LocalSystem and reaches a share as the
+    machine account, so a path that opened fine for the technician typing it can
+    fail every hourly backup because the machine account was never granted
+    access, silently. Use this only for a share whose ACL already grants the
+    machine account read, and test it afterwards.
 
 .PARAMETER Token
     One-time enrollment token. Defaults to $env:SOFTAFRIQUE_ENROLL_TOKEN.
@@ -29,13 +38,18 @@
 .EXAMPLE
     $env:SOFTAFRIQUE_ENROLL_TOKEN = $rmmVar
     .\install.ps1 -MsiPath C:\Temp\agent.msi -BackupPath "D:\CustomerData"
+
+.EXAMPLE
+    $env:SOFTAFRIQUE_ENROLL_TOKEN = $rmmVar
+    .\install.ps1 -MsiPath C:\Temp\agent.msi -BackupPath "\\FILESERVER\CustomerData" -AllowUNC
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$MsiPath,
     [Parameter(Mandatory = $true)][string]$BackupPath,
     [string]$Token = $env:SOFTAFRIQUE_ENROLL_TOKEN,
-    [int]$TimeoutSeconds = 300
+    [int]$TimeoutSeconds = 300,
+    [switch]$AllowUNC
 )
 
 $ErrorActionPreference = 'Stop'
@@ -58,8 +72,67 @@ if (-not (Test-Path $MsiPath)) { Write-Fail "MSI not found at $MsiPath" }
 if ([string]::IsNullOrWhiteSpace($Token)) {
     Write-Fail 'no enrollment token: set SOFTAFRIQUE_ENROLL_TOKEN in the RMM script variable'
 }
-if (-not (Test-Path $BackupPath -PathType Container)) {
-    Write-Fail "backup folder $BackupPath does not exist on this machine"
+
+# The backup folder must be on a fixed disk, checked before anything is created
+# so nothing is made on a drive we are about to refuse.
+#
+# This exists because of a Server 2019 test machine where the backup path was
+# pointed at D:, which was the DVD drive. Every check the installer could
+# express passed, so the install succeeded and then every scheduled backup failed
+# with "device is not ready". The MSI's own validatepath.exe enforces this too,
+# but it runs deferred as SYSTEM, so without a check here the technician gets an
+# msiexec exit code and a log tail instead of a sentence saying what is wrong.
+$volumeOf = if ($BackupPath -like '\\*') { 'a network share' } else {
+    $root = [System.IO.Path]::GetPathRoot($BackupPath)
+    $drive = ($root -replace '[:\\]', '')
+    if ([string]::IsNullOrEmpty($drive)) {
+        Write-Fail "cannot work out which drive $BackupPath is on; give a full path like D:\CustomerData"
+    }
+    try {
+        # ToLowerInvariant, not ToLower: on a Turkish-locale Windows "Fixed"
+        # lowercases to "fıxed" with a dotless i, which would fail the comparison
+        # below and refuse every install on that machine.
+        ([System.IO.DriveInfo]::new("$drive`:")).DriveType.ToString().ToLowerInvariant()
+    } catch {
+        Write-Fail "cannot inspect drive ${drive}: $($_.Exception.Message)"
+    }
+}
+# A network share is the one kind that can be allowed, and only when asked for by
+# name. It is refused by default because the service reaches it as the machine
+# account, which a technician logged in interactively does not test.
+if ($volumeOf -ne 'fixed' -and -not ($AllowUNC -and $volumeOf -eq 'a network share')) {
+    $how = if ($volumeOf -eq 'a network share') {
+        'Pass -AllowUNC if this share is genuinely required and its permissions already grant the machine account access.'
+    } else {
+        'An optical or removable drive can be ejected between backups, and the backup then fails every time.'
+    }
+    Write-Fail ("backup path {0} is on {1}, not a fixed disk. A backup folder must be on a fixed disk: {2}" -f
+        $BackupPath, $volumeOf, $how)
+}
+if ($AllowUNC -and $volumeOf -eq 'a network share') {
+    Write-Step "ALLOWING a network share at $BackupPath on request: verify the machine account can read it before you close this task"
+}
+
+# The backup folder is created if it is missing, not refused.
+#
+# This used to be a hard failure, which was the strictest of the three checks in
+# the install path and disagreed with both of the others: the MSI's own
+# validatepath helper deliberately allowed a missing folder, and the agent
+# recreates one at run time. A customer folder that does not exist yet is a
+# normal thing to be asked to protect, and refusing it meant a technician had to
+# create the folder by hand before the RMM would deploy.
+#
+# A path that exists but is a *file* is still refused, because that is a
+# misconfiguration rather than a folder awaiting data.
+if (Test-Path $BackupPath -PathType Leaf) {
+    Write-Fail "backup path $BackupPath is a file, not a folder"
+} elseif (-not (Test-Path $BackupPath -PathType Container)) {
+    try {
+        New-Item -ItemType Directory -Path $BackupPath -Force -ErrorAction Stop | Out-Null
+        Write-Step "created backup folder $BackupPath"
+    } catch {
+        Write-Fail "could not create backup folder ${BackupPath}: $($_.Exception.Message)"
+    }
 }
 
 $log = Join-Path $env:TEMP "softafrique-install-$([guid]::NewGuid().ToString('N')).log"
@@ -77,6 +150,11 @@ $msiArgs = @(
     "BACKUPPATH=`"$BackupPath`""
 )
 
+# The same opt-in the script just honoured, passed on so the MSI's own
+# validatepath.exe agrees. Without it the install would fail here even though
+# this script was told the share is wanted.
+if ($AllowUNC) { $msiArgs += 'ALLOWUNC=1' }
+
 $proc = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
 if ($proc.ExitCode -ne 0) {
     $tail = (Get-Content $log -Tail 25 -ErrorAction SilentlyContinue) -join "`n"
@@ -85,6 +163,36 @@ if ($proc.ExitCode -ne 0) {
 
 if (-not (Test-Path $AgentExe)) { Write-Fail "the agent was not installed at $AgentExe" }
 Write-Step 'agent installed'
+
+# Record the opt-in in the config file as well, because the MSI property is gone
+# by now and the agent still has to know at three in the morning.
+#
+# The MSI's own check is told by ALLOWUNC on the command line, but the agent's
+# run-time half of the same rule reads config.yaml, and an install that allowed
+# a share and then left the key false would pass the installer and refuse to
+# back up. Writing it here is the one place both halves are decided by the same
+# switch.
+if ($AllowUNC) {
+    $configPath = Join-Path $DataDir 'config.yaml'
+    if (-not (Test-Path $configPath)) {
+        Write-Fail "cannot record the network-share opt-in: $configPath is missing"
+    }
+    try {
+        $text = Get-Content $configPath -Raw -ErrorAction Stop
+        # Match the key with or without a leading comment block already above
+        # it; only the value is being changed, so the surrounding explanation
+        # stays exactly as the installer wrote it.
+        $updated = [regex]::Replace($text, '(?m)^(allow_unc:\s*)(?:true|false)\s*$', '${1}true')
+        if ($updated -eq $text) {
+            Write-Fail ("cannot record the network-share opt-in: no 'allow_unc:' key found in {0}. " +
+                'Add it by hand with the value true, or the agent will refuse the share.') -f $configPath
+        }
+        Set-Content -Path $configPath -Value $updated -NoNewline -Encoding UTF8 -ErrorAction Stop
+        Write-Step "recorded allow_unc: true in $configPath"
+    } catch {
+        Write-Fail "could not record the network-share opt-in in ${configPath}: $($_.Exception.Message)"
+    }
+}
 
 # The service is installed but not started yet, so a scheduled run cannot race
 # enrollment. Start it after the device has credentials.

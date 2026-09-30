@@ -346,3 +346,89 @@ func TestSkippedRunIsNotAFailure(t *testing.T) {
 		t.Errorf("last_attempt_error = %q, want the reason an operator needs", s.LastAttemptError)
 	}
 }
+
+// A recreated folder is its own outcome. The two properties that matter are that
+// last_success does not move -- so the staleness threshold still catches an
+// unprotected device -- and that last_backup_status does not read "success",
+// because a 0.1.0-era monitor reads that field and nothing else.
+func TestRecreatedFolderIsNotSuccessAndDoesNotAdvanceLastSuccess(t *testing.T) {
+	st := New()
+	at := time.Now()
+	st.MarkFinished(at, Outcome{SnapshotID: "real", Elapsed: time.Second})
+	goodSuccess := st.LastSuccess
+	if goodSuccess == "" {
+		t.Fatal("a clean run should set last_success")
+	}
+
+	st.MarkFinished(at.Add(time.Hour), Outcome{
+		SnapshotID:     "empty",
+		Elapsed:        time.Second,
+		RecreatedPaths: []string{`D:\CustomerData`},
+	})
+
+	if st.LastAttemptStatus != AttemptRecreated {
+		t.Errorf("last attempt = %q, want %q", st.LastAttemptStatus, AttemptRecreated)
+	}
+	if st.LastSuccess != goodSuccess {
+		t.Errorf("last_success moved to %q; an empty folder is not protection", st.LastSuccess)
+	}
+	if st.LastSnapshotID != "real" {
+		t.Errorf("last_snapshot_id = %q, want the last snapshot that had data", st.LastSnapshotID)
+	}
+	if st.LastBackupStatus != AttemptFailed {
+		t.Errorf("last_backup_status = %q, want %q", st.LastBackupStatus, AttemptFailed)
+	}
+	if st.ConsecutiveFailures != 0 {
+		t.Errorf("consecutive_failures = %d, want 0: nothing failed", st.ConsecutiveFailures)
+	}
+	if st.ActionRequired == "" {
+		t.Error("action_required must be set so something alerts")
+	}
+	if !strings.Contains(st.ActionRequired, `D:\CustomerData`) {
+		t.Errorf("action_required %q does not name the path", st.ActionRequired)
+	}
+}
+
+// A recreate is not a success, so IsOperational must be false, or a dashboard
+// built on it will call the device healthy.
+func TestRecreatedFolderIsNotOperational(t *testing.T) {
+	st := New()
+	st.SetGatewayState("active", "")
+	st.MarkFinished(time.Now(), Outcome{SnapshotID: "s", Elapsed: time.Second})
+	if !st.IsOperational() {
+		t.Fatal("a clean successful run on an active device should be operational")
+	}
+	st.MarkFinished(time.Now(), Outcome{SnapshotID: "e", RecreatedPaths: []string{"/data"}})
+	if st.IsOperational() {
+		t.Error("a device whose folder was recreated must not report operational")
+	}
+}
+
+// A recreate must not overwrite a pending gateway re-enroll instruction, and a
+// later clean run must not delete one either.
+func TestRecreateNoticeDoesNotClobberAGatewayInstruction(t *testing.T) {
+	st := New()
+	st.SetGatewayState("revoked", "re-enroll: the gateway has withdrawn this device")
+	st.MarkFinished(time.Now(), Outcome{SnapshotID: "e", RecreatedPaths: []string{"/data"}})
+	if st.ActionRequired != "re-enroll: the gateway has withdrawn this device" {
+		t.Errorf("the gateway instruction was overwritten: %q", st.ActionRequired)
+	}
+	st.MarkFinished(time.Now(), Outcome{SnapshotID: "s"})
+	if st.ActionRequired != "re-enroll: the gateway has withdrawn this device" {
+		t.Errorf("a clean run deleted the gateway instruction: %q", st.ActionRequired)
+	}
+}
+
+// The notice has to clear itself, or a device alerts forever after one deleted
+// folder.
+func TestRecreateNoticeIsClearedByTheNextCleanRun(t *testing.T) {
+	st := New()
+	st.MarkFinished(time.Now(), Outcome{SnapshotID: "e", RecreatedPaths: []string{"/data"}})
+	if st.ActionRequired == "" {
+		t.Fatal("expected a notice")
+	}
+	st.MarkFinished(time.Now().Add(time.Hour), Outcome{SnapshotID: "s"})
+	if st.ActionRequired != "" {
+		t.Errorf("action_required = %q, want cleared", st.ActionRequired)
+	}
+}

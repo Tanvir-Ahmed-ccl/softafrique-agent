@@ -5,6 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -66,7 +69,7 @@ func TestArgsNeverContainRetentionCommands(t *testing.T) {
 	r := testRestic(t, nil)
 	invocations := [][]string{
 		r.args("backup"),
-		r.args("init"),
+		r.args("snapshots"),
 		r.args("--json", "snapshots", "--latest", "1"),
 		r.args("--json", "stats", "--mode", ModeRawData),
 		r.args("restore", "latest", "--target", "C:\\out"),
@@ -81,6 +84,53 @@ func TestArgsNeverContainRetentionCommands(t *testing.T) {
 				t.Errorf("restic %s must never be invoked by this agent", arg)
 			}
 		}
+	}
+}
+
+// The gateway creates the repository server-side at enrollment, and enrollment
+// fails if its restic init does not. Mohsin confirmed that, and asked for
+// auto_init to stay off permanently.
+//
+// "Off" was a default once, which is not the same thing as permanent: a
+// hand-edited config could turn it back on, and on a machine nobody is watching
+// a key that can be set is a key that gets set. So the option is gone and the
+// init path with it. This test is what makes that a property of the code rather
+// than a claim in a document -- a future change that reopens the door has to
+// delete this test to get through, and deleting it is a visible act.
+func TestNoInitCodePathExists(t *testing.T) {
+	if _, ok := reflect.TypeOf(Options{}).FieldByName("AllowInit"); ok {
+		t.Error("restic.Options has an AllowInit field; the agent must not be able to create a repository")
+	}
+
+	// Read the package's own source. Checking the fields alone would not notice
+	// somebody calling r.args("init") from a function that takes no option, which
+	// is exactly the shape a careless fix would take.
+	entries, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, name := range entries {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, line := range strings.Split(string(src), "\n") {
+			code := line
+			if idx := strings.Index(code, "//"); idx >= 0 {
+				code = code[:idx]
+			}
+			if strings.Contains(code, `"init"`) {
+				t.Errorf("%s:%d builds a restic init invocation: %s", name, i+1, strings.TrimSpace(line))
+				found++
+			}
+		}
+	}
+	if found == 0 && len(entries) == 0 {
+		t.Error("no source files were read; this test is not checking anything")
 	}
 }
 
@@ -202,8 +252,10 @@ func TestStderrSinkTailIsBounded(t *testing.T) {
 }
 
 func TestExitCodeOfNonExitError(t *testing.T) {
-	// A missing binary is not an exit code, and must not be mistaken for one:
-	// this is what stops EnsureRepo from running init when restic is absent.
+	// A missing binary is not an exit code, and must not be mistaken for one.
+	// This used to matter to EnsureRepo, which used to run init when restic was
+	// absent; EnsureRepo no longer has an init path at all, which
+	// TestNoInitCodePathExists pins.
 	if _, ok := ExitCode(errors.New("exec: \"restic\": executable file not found in $PATH")); ok {
 		t.Error("a spawn failure must not report an exit code")
 	}

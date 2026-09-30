@@ -1,0 +1,648 @@
+openapi: 3.1.0
+
+# The contract between the Softafrique backup agent and the gateway.
+#
+# This file is the machine-readable half. The behaviour that OpenAPI cannot
+# express — that a 5xx keeps backups running, that revocation is signalled by a
+# status code and not by a status value, that there is no /heartbeat endpoint,
+# and that the repository is append-only — is in docs/gateway-contract.md.
+# Read both.
+#
+# Authoritative source: internal/api (client.go, api.go). If this file and the Go
+# structs disagree, the Go structs are what the agent does and this file is the
+# bug. internal/api/client_test.go pins the wire behaviour.
+#
+# What this contract deliberately does NOT contain, because the agent never
+# sends it: repo_stats and schema_version. Both are fields of the agent's local
+# status.json, the file Tactical RMM reads. They are not gateway concepts. See
+# docs/gateway-contract.md, "Two things that are not on this wire".
+
+info:
+  title: Softafrique Backup Gateway API
+  version: "0.2.0"
+  summary: The four calls the backup agent makes.
+  description: |
+    Implemented by the agent in `internal/api`. There are four endpoints and no
+    more. In particular there is **no `POST /heartbeat`**: the agent's heartbeat
+    posts to `POST /status` on a timer, and **liveness is confirmed to be read
+    from `POST /status`** — every device reports after every attempt and at least
+    every 6 hours. A dashboard keyed off a `/heartbeat` route will read every
+    device as offline.
+
+    **Append-only.** The agent has no code path that deletes or expires a
+    snapshot and never invokes restic's `forget` or `prune`. No endpoint here
+    can be used to remove data. Retention is a server-side concern.
+  contact:
+    name: Mohsin (gateway side)
+    url: https://backup.softafrique.net
+
+servers:
+  - url: https://backup.softafrique.net/api/v1
+    description: Production
+  - url: http://localhost:8080/api/v1
+    description: Local development only. Never point a deployed device at this.
+
+tags:
+  - name: enrollment
+    description: One-time exchange of a dashboard token for device credentials.
+  - name: operation
+    description: Calls an already-enrolled device makes.
+
+security: []
+
+paths:
+  /enroll:
+    post:
+      tags: [enrollment]
+      operationId: enroll
+      summary: Exchange a one-time token for this device's credentials.
+      description: |
+        Called exactly once per device, by the RMM script or an operator. No
+        authentication: the single-use token *is* the authentication.
+
+        The reply is the only time the encryption key is ever transmitted. The
+        agent seals it with DPAPI immediately and never writes it to the config
+        file, `status.json`, `argv` or the log. A gateway that wants the key back
+        has it in its own records; the agent cannot produce it.
+
+        The agent proves the reply works before committing it: it calls
+        `GET /config` with the new credentials and opens the repository with the
+        issued key. A bad reply therefore fails at enrollment, with the token
+        still in hand, rather than on tomorrow's scheduled run.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollRequest'
+            examples:
+              default:
+                value:
+                  token: smtl_9f2c1d4e7a8b4c0f
+                  hostname: DESKTOP-ABC
+                  os_caption: Windows Server 2019 Standard
+                  backup_path: 'D:\CustomerData'
+                  agent_version: 0.2.0
+      responses:
+        '200':
+          description: |
+            Credentials issued. Every field marked required below must be present
+            and non-empty; a reply missing any of them is rejected outright rather
+            than half-applied, because a device with a repository but no key
+            cannot back up, and a device with a key but no repository cannot find
+            it.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollResponse'
+              examples:
+                default:
+                  value:
+                    tenant: acme
+                    device_id: dev-01HQ8K2M4P
+                    repository: rest:https://backup.softafrique.net/dev-01HQ8K2M4P
+                    device_password: 4Jt8sQ2vNx1pLmZa
+                    encryption_key: Ym9ndXMtZW5jcnlwdGlvbi1rZXktZG8tbm90LXVzZQ
+                    backup_path: 'D:\CustomerData'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: |
+            **Avoid.** The agent maps 401 on `/enroll` to "credentials rejected",
+            which is meaningless before enrollment exists, and it produces a
+            generic error with no recovery advice. Use 403 for a token problem.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            The token is invalid, expired or already spent. **This is the correct
+            code for a bad token.** The agent stops and tells the operator to ask
+            for a new one; it does not retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: |
+            **This device is already enrolled, and `/enroll` never re-enrolls.**
+            Confirmed behaviour. The agent reports that the device is already
+            enrolled and stops; it will not re-enroll a working device on its
+            own.
+
+            The route to a fresh enrollment is an explicit `agent unenroll` first,
+            and **`/enroll` then returns the same escrowed key** — so an upgrade
+            needs no new token, and a key change can never orphan existing
+            snapshots. If you ever need to force a genuinely new device id, that
+            is a device, not a re-enrollment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '5XX':
+          $ref: '#/components/responses/Unavailable'
+
+  /config:
+    get:
+      tags: [operation]
+      operationId: getConfig
+      summary: Fetch this device's current configuration and gateway verdict.
+      description: |
+        Polled every `config_poll_interval` (default 15 minutes) and before every
+        backup attempt.
+
+        **A `status` value other than the exact string `active` suspends the
+        device.** The comparison is exact and case-sensitive: `inactive`, `Active`,
+        `paused` and a missing or null `status` all read as suspended, by design,
+        so an unrecognised value cannot silently keep a decommissioned device
+        writing to the repository.
+
+        Unknown fields are ignored, so you can add response fields without
+        breaking older agents.
+
+        This is the only call that can suspend a device. `POST /status` cannot.
+      security:
+        - basicAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      responses:
+        '200':
+          description: The device's configuration. `status` is the gateway's verdict.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoteConfig'
+              examples:
+                active:
+                  summary: The normal case
+                  value:
+                    device_id: dev-01HQ8K2M4P
+                    backup_path: 'D:\CustomerData'
+                    status: active
+                    schedule_interval: 1h
+                    retry_interval: 15m
+                suspended:
+                  summary: An operator paused the device
+                  value:
+                    device_id: dev-01HQ8K2M4P
+                    backup_path: 'D:\CustomerData'
+                    status: suspended
+                    schedule_interval: 1h
+                    retry_interval: 15m
+                seconds:
+                  summary: Intervals as bare seconds are also accepted
+                  value:
+                    device_id: dev-01HQ8K2M4P
+                    backup_path: 'D:\CustomerData'
+                    status: active
+                    schedule_interval: 3600
+                    retry_interval: 900
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: |
+            The credentials are not recognised. The agent records the device as
+            **revoked**, sets `action_required` to "re-enroll: the gateway no
+            longer accepts this device's credentials", and stops backing up.
+            Credentials are not refreshed automatically.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            The device has been **withdrawn**. Same local outcome as 401, but the
+            recorded reason is the more specific "re-enroll: the gateway has
+            withdrawn this device".
+
+            **Revoke with this code, not with a `status` value.** Returning
+            `"status": "revoked"` does suspend the device, but the agent records
+            the vague reason `gateway reports device status "revoked"` and does
+            not ask for a re-enrollment, which is the part a human needs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '5XX':
+          $ref: '#/components/responses/Unavailable'
+
+  /status:
+    post:
+      tags: [operation]
+      operationId: postStatus
+      summary: Report the outcome of a backup, or heartbeat that nothing changed.
+      description: |
+        Called after every completed attempt, and on a timer while idle
+        (`status_heartbeat`, default 6 hours) so "online and healthy" is
+        distinguishable from "offline". **This is the heartbeat.** If your
+        dashboard tracks liveness, track it here.
+
+        A heartbeat carries the last-known figures, not a new attempt, so it must
+        never contradict the last real attempt. The agent sends `failed`, with
+        the reason in `last_backup_error`, when nothing has ever succeeded or
+        when the device is suspended or awaiting a decision. It will not
+        heartbeat `success` off a stale snapshot.
+
+        `last_backup_status` is contractually only `success` or `failed`. A
+        report is sent after an attempt has finished, never during one, so there
+        is no `running` value to handle.
+      security:
+        - basicAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StatusReport'
+            examples:
+              success:
+                summary: A completed attempt
+                value:
+                  last_backup_status: success
+                  last_snapshot_id: a1b2c3d4
+                  files_added: 1284
+                  files_changed: 12
+                  bytes_added: 734003200
+                  last_duration_seconds: 41.2
+                  last_backup_error: ''
+                  agent_version: 0.2.0
+                  os_caption: Windows Server 2019 Standard
+              failure:
+                summary: A completed attempt that failed
+                value:
+                  last_backup_status: failed
+                  last_snapshot_id: ''
+                  files_added: 0
+                  files_changed: 0
+                  bytes_added: 0
+                  last_duration_seconds: 8.7
+                  last_backup_error: 'Fatal: unable to open config file: The system cannot find the path specified.'
+                  agent_version: 0.2.0
+                  os_caption: Windows Server 2019 Standard
+      responses:
+        '200':
+          description: |
+            Accepted. **The agent reads no response body**, so the content of a
+            2xx is irrelevant. Return 200 with an empty body.
+          content:
+            application/json:
+              schema: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: |
+            Credentials rejected. The agent records the device as **revoked** and
+            stops. **Use 403 rather than 401** for a withdrawn device; 401 means
+            the same thing to the agent but 403 is the confirmed code, and 403 is
+            also what `/enroll` uses for an invalid, expired or spent token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            The device is **revoked or archived**. Confirmed: this is how both are
+            signalled, from `/config` as well as here.
+
+            The agent records the device as revoked, sets `action_required` to
+            "re-enroll: the gateway has withdrawn this device", and stops. Because
+            this is returned from `/status` too, a withdrawal takes effect on the
+            next attempt rather than up to 15 minutes later at the next config
+            poll.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '5XX':
+          $ref: '#/components/responses/Unavailable'
+
+  /health:
+    get:
+      tags: [operation]
+      operationId: health
+      summary: Liveness probe. Unauthenticated.
+      description: |
+        Used by `agent doctor` and by the RMM scripts at install time. A failure
+        is logged as a warning and **never** blocks enrollment or a backup: the
+        gateway API and the repository endpoint are different services, and being
+        unable to reach this one must not stop data protection.
+
+        The agent treats any 2xx as healthy and does not read the body.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      responses:
+        '200':
+          description: Alive. The body is not read.
+          content:
+            application/json:
+              schema: {}
+        '5XX':
+          description: Down. Non-fatal to the agent; reported to the operator.
+
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: |
+        The `device_id` from enrollment as the username and the
+        `device_password` from the enrollment reply as the password.
+
+        Note this is the *device* password, not a user login and not the
+        repository encryption key. The agent refuses to follow a cross-host
+        redirect on these calls so the credential is not replayed elsewhere, and
+        requires TLS 1.2 or better.
+
+  parameters:
+    UserAgent:
+      name: User-Agent
+      in: header
+      required: false
+      schema:
+        type: string
+      example: SoftafriqueBackupAgent/0.2.0
+      description: Identifies the build making the call.
+
+  responses:
+    BadRequest:
+      description: |
+        The request was refused. The agent treats this as non-retryable and
+        surfaces the gateway's own message to the operator, because the body
+        usually says more than the code does. On `/enroll` this is also how a
+        rejected hostname arrives.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unavailable:
+      description: |
+        The gateway could not be reached, or answered 5xx.
+
+        **This never stops a backup.** The agent keeps the last known
+        configuration and keeps backing up, so a gateway outage degrades
+        reporting rather than protection.
+
+        The corollary matters for you: **never implement "suspend this device"
+        as a 5xx.** The agent will not stop, because it cannot distinguish an
+        outage from a decision. Suspend with `200` and `"status": "suspended"`.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    EnrollRequest:
+      type: object
+      required: [token, hostname, os_caption, backup_path, agent_version]
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          description: |
+            The single-use enrollment token issued by the dashboard. Sent in a
+            JSON body, never as an MSI property or a command-line argument, both
+            of which leak it into logs and the process table.
+          example: smtl_9f2c1d4e7a8b4c0f
+        hostname:
+          type: string
+          description: |
+            The sanitized machine name, e.g. `DESKTOP-ABC`. Lowercased and
+            stripped of anything outside `[A-Za-z0-9._-]`, truncated to 64
+            characters. **A 400 here is most often a hostname your validation
+            rejects** — check this before blaming the token.
+        os_caption:
+          type: string
+          description: |
+            The OS name as Windows reports it, e.g. `Windows Server 2019
+            Standard`. May be imprecise (`Windows`) on an unpatched host, in
+            which case the agent logs a warning and sends it anyway.
+        backup_path:
+          type: string
+          description: |
+            The folder the customer wants protected, as the installer was told.
+            Purely informational on enroll: it is a default that a `backup_path`
+            in your reply overrides, and that `GET /config` overrides again. The
+            agent never creates it.
+        agent_version:
+          type: string
+          example: 0.2.0
+
+    EnrollResponse:
+      type: object
+      required: [device_id, repository, device_password, encryption_key]
+      additionalProperties: true
+      properties:
+        tenant:
+          type: string
+          description: |
+            The customer this device belongs to. Recorded for display. Optional —
+            the agent does not refuse a reply without it, but the monitoring file
+            will show an empty tenant.
+          example: acme
+        device_id:
+          type: string
+          description: |
+            **Must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`.** The agent refuses
+            to enroll against anything else, so a UUID with other characters, a
+            space, or a leading punctuation mark is rejected here rather than at
+            the first backup.
+
+            This value is passed to restic as `--host` and becomes the device's
+            identity in the repository. It is never derived from the machine
+            name. **It is also permanent**: it appears in existing snapshot
+            filenames, so changing it orphans the history. See open question 3 in
+            docs/gateway-contract.md.
+          example: dev-01HQ8K2M4P
+        repository:
+          type: string
+          description: |
+            The restic repository URL for this device.
+
+            **Two requirements the agent enforces:**
+
+            1. It must not embed credentials. A `user:pass@` section is refused
+               with an explicit error, because a URL with a password in it is
+               world-readable in a process command line.
+            2. Any password or query string is stripped before the URL is written
+               to disk or logged, so the form you send is not the form that is
+               stored.
+
+            Whether the `rest:` prefix is expected is open question 3; the agent
+            passes this string to restic as-is.
+          example: rest:https://backup.softafrique.net/dev-01HQ8K2M4P
+        device_password:
+          type: string
+          description: |
+            The HTTP basic password for `/config` and `/status`. DPAPI-sealed on
+            the device and never written anywhere in the clear.
+          example: 4Jt8sQ2vNx1pLmZa
+        encryption_key:
+          type: string
+          description: |
+            The restic repository encryption key. Transmitted exactly once,
+            here. This is the value the dashboard escrows for restore-after-loss.
+
+            It is a secret: send it in the body only, never in a URL, a query
+            string, a redirect or a header that gets logged at the edge.
+        backup_path:
+          type: string
+          description: |
+            Optional. Overrides the `backup_path` the agent sent. If you omit it,
+            the agent keeps the value from the request.
+          example: 'D:\CustomerData'
+
+    RemoteConfig:
+      type: object
+      required: [status]
+      additionalProperties: true
+      properties:
+        device_id:
+          type: string
+          description: Recorded for display; the agent authenticates with the id it already holds.
+          example: dev-01HQ8K2M4P
+        backup_path:
+          type: string
+          description: |
+            The folder to protect. Overrides the local config. This is how you
+            move a device to a new folder without an installer run.
+
+            **The agent creates it if it is missing**, including the whole path
+            tree, and then reports the attempt as `recreated` rather than as a
+            success — a snapshot of a folder the agent had to create is a snapshot
+            of an empty directory, and reporting that as green is the lie 0.2.0
+            was written to remove.
+
+            It must be on a **fixed disk**. A network share, an optical drive and
+            a removable drive are all refused, and the refusal is terminal and
+            written to `status.json` naming the path. A share is allowed only
+            where somebody has opted in (`allow_unc: true` in `config.yaml`, or
+            `install.ps1 -AllowUNC`). See `internal/pathpolicy`.
+          example: 'D:\CustomerData'
+        status:
+          type: string
+          description: |
+            The gateway's verdict on whether this device may back up.
+
+            **Only `active` permits a backup.** Every other value — `suspended`,
+            `inactive`, a value you add later, `""`, or the field missing
+            entirely — suspends the device. The comparison is exact and
+            case-sensitive.
+
+            This field only ever carries `active` or `suspended`. A device that
+            is `revoked` or `archived` is not described here at all: it is
+            signalled by **403** from this endpoint and from `POST /status`, which
+            is what makes the agent ask for re-enrollment rather than sit on a
+            dead credential.
+          enum: [active, suspended]
+          example: active
+        schedule_interval:
+          $ref: '#/components/schemas/Interval'
+        retry_interval:
+          $ref: '#/components/schemas/Interval'
+
+    Interval:
+      description: |
+        An interval, accepted in either of two wire formats:
+
+        * a Go duration string — `"1h"`, `"30m"`, `"90s"`; or
+        * a number, or a numeric string, of **seconds** — `3600`, `"3600"`.
+
+        `null` or an omitted field means "no change", leaving the local
+        configured value in place. `0` or a negative value is also treated as "no
+        change" rather than as a request to back up continuously.
+      oneOf:
+        - type: string
+          examples: ['1h', 30m, 900]
+        - type: number
+          examples: [3600, 900]
+      example: 1h
+
+    StatusReport:
+      type: object
+      required:
+        - last_backup_status
+        - last_snapshot_id
+        - files_added
+        - files_changed
+        - bytes_added
+        - last_duration_seconds
+        - last_backup_error
+        - agent_version
+        - os_caption
+      additionalProperties: false
+      properties:
+        last_backup_status:
+          type: string
+          description: |
+            The outcome. Contractually only `success` or `failed`.
+
+            There is deliberately no third value and no `suspended`: a device the
+            gateway has suspended, or one that has never run, is reported as
+            `failed` with the reason in `last_backup_error`. Reporting a
+            third state here would mean inventing a schema on your side.
+
+            A report is only sent after an attempt has finished, so a device
+            mid-backup is never reported.
+          enum: [success, failed]
+        last_snapshot_id:
+          type: string
+          description: |
+            The restic snapshot id from the last attempt, or `""` if there has
+            never been one or the attempt failed.
+        files_added:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Files new to the repository, from the last attempt.
+        files_changed:
+          type: integer
+          format: int64
+          minimum: 0
+        bytes_added:
+          type: integer
+          format: int64
+          minimum: 0
+        last_duration_seconds:
+          type: number
+          format: double
+          minimum: 0
+          description: |
+            Wall-clock seconds for the last attempt, **including time spent
+            waiting on the network**. A backup that waited three and a half
+            minutes for the network and then worked for one second is 211
+            seconds here. restic's own duration is not in this contract; it is in
+            the local status file as `restic_duration_seconds`.
+        last_backup_error:
+          type: string
+          description: |
+            Empty on success. On failure, the operator-facing reason. It is
+            written for someone reading a dashboard at 2am, so it names the
+            cause rather than the class of error.
+
+            The agent strips the repository URL from restic's output before it
+            reaches this field, so a repository path cannot leak through it.
+        agent_version:
+          type: string
+          example: 0.2.0
+        os_caption:
+          type: string
+          example: Windows Server 2019 Standard
+
+    Error:
+      type: object
+      description: |
+        Optional. The agent reads no structured error fields — it logs the first
+        300 characters of the body to help an operator, and on `/enroll` it puts
+        the body in the message it shows the technician. Anything readable and
+        specific works; `{"error": "token already used"}` is ideal.
+      properties:
+        error:
+          type: string
+          example: token already used

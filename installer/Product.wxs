@@ -67,14 +67,14 @@
       <Component Id="AgentExe" Guid="1E4C2A80-9B3D-4F51-8A67-2C0D9E5B7A11">
         <File Id="AgentExeFile"
               Name="SoftafriqueBackupAgent.exe"
-              Source="$(var.BindPath)\SoftafriqueBackupAgent.exe"
+              Source="!(bindpath.bin)\SoftafriqueBackupAgent.exe"
               KeyPath="yes" />
       </Component>
 
       <Component Id="ResticExe" Guid="2F5D3B91-0C4E-4A62-9B78-3D1E0F6C8B22">
         <File Id="ResticExeFile"
               Name="restic.exe"
-              Source="$(var.BindPath)\restic.exe"
+              Source="!(bindpath.bin)\restic.exe"
               KeyPath="yes" />
       </Component>
 
@@ -83,7 +83,7 @@
       <Component Id="ValidatePathExe" Guid="3A6E4CA2-1D5F-4B73-8C89-4E2F1A7D9C33">
         <File Id="ValidatePathExeFile"
               Name="validatepath.exe"
-              Source="$(var.BindPath)\validatepath.exe"
+              Source="!(bindpath.bin)\validatepath.exe"
               KeyPath="yes" />
       </Component>
     </ComponentGroup>
@@ -175,20 +175,33 @@
       from what the RMM asked for. The template's placeholders are filled from
       the properties below, so the installed file is always internally
       consistent with where the files actually are.
+
+      The one thing this cannot do is change allow_unc on a later install,
+      because NeverOverwrite skips the file entirely. That is the lesser evil: an
+      upgrade must not re-grant an opt-in the operator has since withdrawn by
+      hand, and a repair must not undo an operator who has tightened the config.
+
+      The opt-in is therefore not written from here at all. install.ps1 -AllowUNC
+      passes ALLOWUNC=1 on the command line so this check agrees, and then edits
+      allow_unc in config.yaml after the install, which both survives
+      NeverOverwrite and puts the value where a person can read and change it.
     -->
     <Component Id="ConfigFile" Guid="6D9B7FD5-4A82-4EA6-9FB2-7B5C4DAF0C66" Directory="DATAFOLDER">
       <util:ConfigurableTextFile Id="ConfigFileName"
                                  Name="config.yaml"
-                                 Source="$(var.ProjectDir)\config.yaml.template"
+                                 Source="!(bindpath.res)\config.yaml.template"
                                  Encoding="UTF-8"
                                  NeverOverwrite="yes"
                                  Configuration="DATADIR=[DATAFOLDER];STATUSFILE=[STATUSFILE];LOGFILE=[LOGFILE];BACKUPPATH=[BACKUPPATH]" />
     </Component>
 
     <!-- ================= properties ================= -->
-    <!-- The folder to protect. A deployment is expected to set this; the
-         default matches the agent's own platform default so a hand-typed
-         install still protects something real rather than a drive root. -->
+    <!-- The folder to protect. A deployment is expected to set this; an
+         interactive install is now asked for it on the BackupPathDlg page
+         below; and a hand-typed /qn install that sets neither falls back to
+         this default rather than to a drive root. The default is created if
+         absent and refused if it is not on a fixed disk, both by
+         validatepath.exe. -->
     <Property Id="BACKUPPATH" Value="C:\SoftafriqueBackup" />
 
     <Property Id="STATUSFILE" Value="[DATAFOLDER]status.json" />
@@ -203,11 +216,40 @@
          the network. -->
     <Property Id="TESTINSTALL" Secure="yes" />
 
+    <!-- Set ALLOWUNC=1 to permit a network share as the folder to protect. A
+         network share is refused by default, and this is the only way past it.
+
+         The reason is not that restic cannot read one; it can. The service runs
+         as LocalSystem and reaches a share as the machine account, so
+         \\FILESERVER\CustomerData can open fine for the technician who typed it
+         and then fail every hourly backup because the machine account was never
+         granted access -- silently, with nothing in status.json to explain it.
+         A path that works interactively and dies quietly as a service is worse
+         than a refused install, so allowing it is a decision somebody has to
+         make on purpose.
+
+         This is a launch-time property, not a dialog control. A property set by
+         a control lives in the client-side property table and a deferred custom
+         action cannot see it; passing it on the msiexec command line is what
+         makes it reach ValidateBackupFolder. A technician who genuinely needs a
+         share should install silently with ALLOWUNC=1, which is what
+         scripts/rmm/install.ps1 -AllowUNC does.
+    -->
+    <Property Id="ALLOWUNC" Secure="yes" />
+
+    <!-- Set just before the check, so the flag is present only when it was asked
+         for. The space is inside the value so the command line reads correctly
+         with the switch absent. -->
+    <Property Id="ALLOWUNCSWITCH" Secure="yes" />
+    <SetProperty Id="ALLOWUNCSWITCH" Value="-allow-unc "
+                 Before="ValidateBackupFolder" Sequence="execute" Condition="ALLOWUNC" />
+
     <Property Id="VALIDATEFOLDERCMD" Secure="yes" />
     <Property Id="ENROLLCMD" Secure="yes" />
     <Property Id="STARTSERVICECMD" Secure="yes" />
 
-    <SetProperty Id="VALIDATEFOLDERCMD" Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; &quot;[BACKUPPATH]&quot;"
+    <SetProperty Id="VALIDATEFOLDERCMD"
+                 Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; [ALLOWUNCSWITCH]&quot;[BACKUPPATH]&quot;"
                  Before="ValidateBackupFolder" Sequence="execute" />
     <SetProperty Id="ENROLLCMD"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; enroll -token-file &quot;[ENROLLTOKENFILE]&quot; -config &quot;[DATAFOLDER]config.yaml&quot;"
@@ -263,14 +305,88 @@
               Condition="NOT TESTINSTALL AND NOT REMOVE AND ENROLLTOKENFILE" />
     </InstallExecuteSequence>
 
-    <!-- The folder check is deliberately absent from the UI sequence. It is a
-         deferred, SYSTEM-context action, and Windows Installer ignores a
-         deferred action scheduled from a UI sequence, so listing it here would
-         leave the interactive install doing nothing while appearing to validate.
-         A /qn install still runs it in the execute sequence above, which is the
-         path the RMM and CI both use. -->
+    <!-- The check runs once, in the execute sequence, for every install mode:
+         interactive, quiet and basic MSI alike. Windows Installer runs the UI
+         sequence to completion and then runs the execute sequence, so listing
+         this action a second time in InstallUISequence would achieve nothing --
+         Windows Installer ignores a deferred action scheduled from a UI
+         sequence -- and would look as though the interactive install validated
+         something twice.
+
+         What an interactive install does not get is the reason. The check is
+         deferred and runs as SYSTEM after the files are laid down, so a refused
+         path surfaces as a rollback at the end of the progress bar, with the
+         explanation in the MSI log rather than on screen. That is why the
+         dialog below says so, and why validatepath.exe is shipped as its own
+         component: a technician who wants to test a candidate folder before
+         committing to it can run it by hand and read the sentence on stderr. -->
 
     <UIRef Id="WixUI_InstallDir" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- ================= protected folder prompt ================= -->
+    <!--
+      Asks the technician which folder to protect, defaulting to the value
+      BACKUPPATH already carries.
+
+      Why this exists: with no prompt, a hand-typed `msiexec /i` install silently
+      protected C:\SoftafriqueBackup, an empty folder created by nobody, which is
+      the "quietly backing up nothing" outcome that validatepath.exe was written
+      to prevent. The value was right and still wrong, because nobody was shown
+      it.
+
+      The RMM path does not come through here at all. install.ps1 takes
+      -BackupPath as a mandatory parameter, so PowerShell prompts for it and
+      passes it on the msiexec command line as BACKUPPATH, and it installs with
+      /qn, which runs no UI sequence. This dialog only ever appears to a human at
+      the keyboard running msiexec without /qn.
+
+      Validation is unchanged and does run for every install, prompted or not:
+      the ValidateBackupFolder action creates the folder and refuses a
+      non-fixed volume, from the execute sequence, which every install mode goes
+      through. This dialog only collects the value.
+
+      What the dialog cannot do is report a refusal: the check is deferred, so a
+      bad path ends the install with a rollback and the reason in the log. The
+      description says so rather than implying an answer arrives on this page,
+      and validatepath.exe can be run by hand to test a path first.
+
+      NOT YET VERIFIED: this needs a Windows host to compile and a human to walk
+      the UI. See docs/OPERATIONS.md. If the <Publish> below does not take effect
+      against WixUI_InstallDir's own sequence, the failure mode is that no prompt
+      appears and the install behaves exactly as 0.2.0 did, not a broken install.
+    -->
+    <UI>
+      <Dialog Id="BackupPathDlg" Width="370" Height="270" Title="Folder to protect">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15"
+                 Transparent="no" NoPrefix="yes" Text="{\WixUI_Font_Title}Folder to protect" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="324" Height="39"
+                 Transparent="no" NoPrefix="yes"
+                 Text="Enter the customer folder to protect. It is created if it does not exist, and it must be on a fixed disk." />
+        <Control Id="FolderLabel" Type="Text" X="25" Y="75" Width="90" Height="15"
+                 Transparent="no" NoPrefix="yes" Text="Folder" />
+        <Control Id="BackupPathEdit" Property="BACKUPPATH" Type="PathEdit"
+                 X="120" Y="73" Width="229" Height="17" Indirect="no" />
+        <Control Id="Warning" Type="Text" X="25" Y="100" Width="324" Height="45"
+                 Transparent="no" NoPrefix="yes"
+                 Text="An optical or removable drive will be refused, and so will a network share: the service runs as LocalSystem and may not be able to reach it. If the install rolls back, the reason is in the MSI log, or run validatepath.exe in the install folder to test this path first." />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17"
+                 Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
+                 Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="CostFinalize" />
+        </Control>
+      </Dialog>
+
+      <!-- Take over the Next button on the install-location page so the folder
+           page follows it. CostFinalize is where WixUI_InstallDir would have
+           gone next, so nothing downstream of the sequence is lost. -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="BackupPathDlg" />
+    </UI>
   </Package>
 </Wix>

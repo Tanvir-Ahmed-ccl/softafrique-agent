@@ -37,7 +37,7 @@ Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw | Convert
 | `enrolled` | `false` means the device has no key. Nothing is being protected. |
 | `server_status` | The gateway's view. Anything but `active` means backups are withheld. |
 | `action_required` | Written for a human. If it is set, read it; it says what to do. |
-| `last_attempt_status` | `running`, `success`, `failed` or `suspended`. `suspended` is not a failure: nothing was attempted. |
+| `last_attempt_status` | `running`, `success`, `failed`, `suspended` or `recreated`. `suspended` is not a failure: nothing was attempted. `recreated` means the protected folder was missing and was recreated, so the snapshot is empty: `last_success` did not move, and the fix is a site visit. |
 | `last_attempt_start` / `last_attempt_end` | Bracket the last attempt, so a `running` older than a few hours is a stuck restic. |
 | `last_success` | When data was last actually protected. This is the field that matters. |
 | `last_duration_seconds` | Wall clock, including waiting for the network. This is what to quote a customer. |
@@ -89,6 +89,22 @@ The gateway no longer accepts the device's credentials, or has withdrawn it. Thi
 is deliberately not retried. Get a new one-time token from the dashboard and run
 `install.ps1` again; the repository and its snapshots are untouched.
 
+### "It says the protected folder was missing"
+
+`last_attempt_status` is `recreated`. Someone deleted the folder the device was
+asked to protect, and the agent recreated it rather than failing every hour
+forever. The run that followed captured an **empty directory**, so the device is
+running and reporting but protecting nothing.
+
+This needs a site visit: confirm the customer's data is actually in the path named
+in `action_required`. If it is not, they moved or lost it, and the snapshots
+before the deletion are the only copy.
+
+`last_success` deliberately did not move, so the staleness check above will also
+fire once the threshold passes. That is intended: it is the same condition seen
+from the other direction. The notice clears itself on the next run that backs up
+real data.
+
 ### "The backup takes four minutes but the dashboard says one second"
 
 Check `last_duration_seconds` against `restic_duration_seconds` in
@@ -118,6 +134,22 @@ it had no way to talk to the gateway. So 0.1.0 to 0.2.0 is an *enrollment*, not
 an upgrade. Run `install.ps1` with a token. The old `repo` line and
 `password_file` in `config.yaml` are replaced; the plaintext password file is
 deleted.
+
+This is worth being precise about, because the gateway guarantees that an
+unenroll-then-re-enroll returns the *same escrowed key*, and it is easy to
+misread that as "0.2.0 upgrades need no token". It does not. That guarantee covers
+a device the gateway already knows, and 0.1.0 is not one: the gateway holds no
+key for it, so its first enrollment mints one. There is no history at risk,
+because there is no gateway-side history for that device.
+
+A `config.yaml` still carrying the retired `auto_init` key loads and ignores it.
+This is deliberate: the MSI writes `config.yaml` with `NeverOverwrite`, so a
+stale file from 0.1.0 is *not* replaced on a major upgrade, and refusing to start
+over a key that no longer does anything would turn a cosmetic leftover into an
+outage. Genuinely unknown keys are still refused.
+
+The full procedure, including the re-enrollment case that does **not** need a new
+key, is in [`JOINT-SESSION.md`](JOINT-SESSION.md).
 
 Verify after the upgrade:
 
@@ -169,7 +201,36 @@ Start-Service SoftafriqueBackupAgent
 * **Certificate-based TLS pinning.** Go enforces TLS 1.2 minimum. There is no
   pin, so a machine trusting a rogue CA could be intercepted. Deferred until
   mohsin decides whether the gateway will publish a stable certificate chain.
-* **Windows test coverage on CI.** DPAPI, the named mutex and the service
-  wrapper are vetted with `GOOS=windows` and tested natively on
-  `windows-latest`, but they are not tested on a real domain-joined Server 2019.
-  Do that before GA.
+* **The protected-folder prompt in the MSI.** The installer now shows a page
+  asking which folder to protect, so a hand-typed `msiexec /i` no longer silently
+  protects an empty `C:\SoftafriqueBackup`. **This has not been compiled or
+  walked through**: the WiX toolset is not available on the build host used for
+  0.2.0, and the dialog is inserted by taking over the Next button on the
+  install-location page. If that `<Publish>` does not take effect the failure mode
+  is benign — no prompt, and the install behaves exactly as 0.2.0 did. Compile
+  the MSI and click through it on a Windows host before the installer is used by
+  anyone. The RMM path does not depend on it: `install.ps1` prompts for
+  `-BackupPath` in PowerShell and installs with `/qn`, which runs no UI.
+* **The fixed-disk check, on a real machine.** The policy is confirmed: fixed
+  disks only, a network share refused unless somebody opted in, and optical or
+  removable drives refused with no opt-in. It lives in `internal/pathpolicy` and
+  is applied twice — by `validatepath.exe` on what a technician typed, and by the
+  agent on every path before restic is handed it — so the installer and the
+  running agent cannot disagree.
+
+  It uses `GetDriveType`, so the volume half exists only in the Windows build;
+  off Windows `internal/pathpolicy` applies the share half and passes the volume
+  half through, which is stated in `volume_other.go` rather than hidden. The
+  assertions are in `volume_windows_test.go` and run on the `windows-latest` CI
+  job. **None of that is a real Server 2019 with a real DVD drive**, which is the
+  machine this bug came from. Do that before GA: see
+  [`JOINT-SESSION.md`](JOINT-SESSION.md).
+* **Windows test coverage on CI.** DPAPI, the named mutex, the service wrapper
+  and the volume-type classifier are vetted with `GOOS=windows` and tested
+  natively on `windows-latest`, but they are not tested on a real domain-joined
+  Server 2019. Do that before GA: see [`JOINT-SESSION.md`](JOINT-SESSION.md).
+* **Creating an SMB share from the installer.** Not built, and nothing depends on
+  it. A share has to exist and be shared before the install, and the machine
+  account has to have been granted access to it — the opt-in covers the sites that
+  need one. See
+  [`gateway-contract.md`](gateway-contract.md#5-fixed-disk-policy-for-the-protected-folder).

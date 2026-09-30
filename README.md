@@ -81,10 +81,13 @@ protected?", so a failure moves `last_attempt_*` and
 `GET /config` that is not `active` stops backups. Defaulting to "unknown means
 carry on" would let a decommissioned device keep writing.
 
-**`restic init` is off by default.** 0.1.0 ran it after any failure to list
-snapshots, so a wrong device id created a brand new empty repository at the
-wrong path and split the customer's history in two. Now init happens only on
-restic's exit code 10 (repository missing) and only if `auto_init` says so.
+**The agent cannot create a repository at all.** 0.1.0 ran `restic init` after any
+failure to list snapshots, so a wrong device id created a brand new empty
+repository at the wrong path and split the customer's history in two. The gateway
+creates the repository server-side at enrollment and fails the enrollment if its
+own `init` fails, so the agent has no init code path to reach for. A missing
+repository is now terminal and says so in `status.json` rather than being
+papered over with a new empty one.
 
 **There is exactly one place an attempt is recorded.** Both the scheduled loop
 and a hand-run `agent backup` go through the scheduler's attempt bookkeeping, so
@@ -161,7 +164,7 @@ enrolled device.
   "os_caption": "Windows Server 2019 Standard 10.0.17763",
   "enrolled": true,
   "server_status": "active",
-  "last_attempt_status": "success",   // running | success | failed | suspended
+  "last_attempt_status": "success",   // running | success | failed | suspended | recreated
   "last_attempt_start": "2026-10-08T09:00:00Z",
   "last_success":      "2026-10-08T09:04:12Z",
   "last_duration_seconds": 252,        // wall clock
@@ -172,6 +175,11 @@ enrolled device.
   "repo_stats": { "repo_bytes": 0, "snapshot_count": 0, "captured_at": "" }
 }
 ```
+
+`last_attempt_status` can also be `recreated`: the protected folder was missing
+and the agent recreated it, so the snapshot that followed held an empty directory.
+`last_success` does not move for a `recreated` attempt, because nothing was
+protected, and `action_required` is set until a real backup runs.
 
 `last_backup_status` and `last_backup_time` are kept for monitoring scripts
 written against 0.1.0. A 0.1.0 `status.json` is migrated on read: the

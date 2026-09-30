@@ -102,6 +102,35 @@ if ($st.action_required) {
     Add-Problem "the agent needs a human: $($st.action_required)"
 }
 
+# A recreated folder. The attempt itself did not error, so consecutive_failures
+# stays 0 and nothing else here would catch it, but the snapshot that followed
+# held an empty directory: the device is running, reporting, and protecting
+# nothing. Called out separately because the fix is a site visit, not a restart,
+# and because it is the one condition that is greppable on its own state.
+if ($st.last_attempt_status -eq 'recreated') {
+    $where = if ($st.last_attempt_error) { $st.last_attempt_error } else { 'no detail recorded' }
+    Add-Problem "the protected folder was missing and was recreated empty: $where"
+}
+
+# ---- protecting a network share --------------------------------------------
+# A share is allowed, but only because somebody opted in deliberately, and the
+# thing that breaks it afterwards is invisible from the agent: the service runs
+# as LocalSystem, so it needs the *machine account* to have access to the share.
+# Revoke that grant and every backup starts failing at 22:00 with nothing in the
+# local logs that points at the share at all.
+#
+# So a healthy device backing up to a share is reported as a problem. It is
+# working, and the RMM operator needs to know it is working that way -- the fix
+# is a filesystem grant, not a service restart, and nobody is looking for that
+# unless they are told.
+if ($st.backup_paths) {
+    foreach ($bp in $st.backup_paths) {
+        if ($bp -and $bp.StartsWith('\\')) {
+            Add-Problem "backing up to the network share $bp; the service runs as LocalSystem, so the machine account needs access to it (it is allowed only via allow_unc)"
+        }
+    }
+}
+
 # ---- has it actually backed up ----------------------------------------------
 $thresholdHours = $MaxHoursSinceSuccess
 if ($thresholdHours -le 0) {

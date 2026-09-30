@@ -112,11 +112,21 @@ type Config struct {
 	// throttled rather than run after every backup.
 	StatsEnabled *bool `yaml:"stats_enabled"`
 
-	// AutoInit permits `restic init` when the repository is missing. Off by
-	// default: the gateway creates the repository at enrollment, so an
-	// unexpected init means the agent is looking at the wrong path and would
-	// create a second, empty repository and split the customer's history.
-	AutoInit bool `yaml:"auto_init"`
+	// AllowUNC permits a network share (\\server\share\folder) as the folder to
+	// protect. Off by default.
+	//
+	// The reason is the same at run time as at install time: the service runs as
+	// LocalSystem, so it reaches a share as the machine account. A path the
+	// technician could open while logged in can fail every hourly backup because
+	// the machine account has no access, and nothing in status.json would say
+	// why, because restic's error and "the share is not reachable" look the same
+	// from a dashboard. install.ps1 -AllowUNC writes this key, so a deployment
+	// that was allowed once stays allowed after a reinstall.
+	//
+	// This is the only escape hatch in the protected-folder policy. Optical and
+	// removable drives have none, because an ejected disc is not a
+	// misconfiguration to be tolerated but a backup that silently stops existing.
+	AllowUNC bool `yaml:"allow_unc"`
 
 	// Verbose enables debug-level logging.
 	Verbose bool `yaml:"verbose"`
@@ -239,6 +249,27 @@ func Load(path string, overrides map[string]string) (*Config, error) {
 	return cfg, nil
 }
 
+// legacyKeys are keys that used to be part of the schema and are now ignored
+// rather than rejected.
+//
+// Rejecting them would be the stricter choice and the wrong one. The MSI writes
+// config.yaml with NeverOverwrite, so a device upgrading in place keeps the file
+// it was given, including keys that build happened to ship. Refusing to start
+// because of a key the agent no longer acts on would turn "this option is gone"
+// into "this device is unprotected", which is the worst possible trade for a
+// backup agent.
+//
+// Each entry exists because a released build could write it. Remove one only
+// once no supported upgrade path can carry it.
+//
+//	auto_init: the gateway creates the repository at enrollment and fails the
+//	          enrollment if its restic init does not, so the agent no longer has
+//	          any init code path. A stale key here is not an error, it is a
+//	          no-op, and the agent cannot act on it either way.
+var legacyKeys = map[string]string{
+	"auto_init": "the gateway creates the repository at enrollment; the agent has no init code path",
+}
+
 // loadYAML decodes into cfg, rejecting keys the schema does not have.
 func loadYAML(data []byte, cfg *Config) error {
 	// Unknown keys are an error, not a shrug.
@@ -251,6 +282,23 @@ func loadYAML(data []byte, cfg *Config) error {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
+		if isOnlyLegacyKeys(err) {
+			// Retry without them. A config carrying a retired key is a config
+			// that should work, and the error it produced is about our own
+			// bookkeeping rather than about anything the operator wrote.
+			cleaned, err := withoutLegacyKeys(data)
+			if err != nil {
+				return err
+			}
+			dec = yaml.NewDecoder(bytes.NewReader(cleaned))
+			dec.KnownFields(true)
+			if err := dec.Decode(cfg); err != nil {
+				if !errors.Is(err, io.EOF) {
+					return err
+				}
+			}
+			return nil
+		}
 		// An empty file decodes to io.EOF, which is a valid empty config that
 		// applyDefaults and Validate then finish off.
 		if !errors.Is(err, io.EOF) {
@@ -258,6 +306,59 @@ func loadYAML(data []byte, cfg *Config) error {
 		}
 	}
 	return nil
+}
+
+// isOnlyLegacyKeys reports whether err is nothing more than unknown-field errors
+// for keys that used to exist.
+//
+// A config with a retired key *and* a genuine typo must still fail. The check
+// is deliberately strict about that: every offending line in the error has to
+// name a legacy key, or the operator's typo goes unnoticed because something
+// unrelated was also wrong.
+func isOnlyLegacyKeys(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "field ") || !strings.Contains(msg, "not found") {
+		return false
+	}
+	// yaml.v3 formats these as:
+	//   yaml: unmarshal errors:
+	//     line 42: field auto_init not found in type config.Config
+	const marker = "field "
+	rest := msg
+	found := 0
+	for {
+		i := strings.Index(rest, marker)
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len(marker):]
+		sp := strings.IndexAny(rest, " \n")
+		if sp < 0 {
+			return false
+		}
+		name := rest[:sp]
+		if _, ok := legacyKeys[name]; !ok {
+			return false
+		}
+		found++
+		rest = rest[sp:]
+	}
+	return found > 0
+}
+
+// withoutLegacyKeys returns data with the retired keys removed.
+func withoutLegacyKeys(data []byte) ([]byte, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	for k := range legacyKeys {
+		delete(doc, k)
+	}
+	return yaml.Marshal(doc)
 }
 
 func applyDefaults(cfg *Config) {

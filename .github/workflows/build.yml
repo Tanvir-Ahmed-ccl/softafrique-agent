@@ -54,10 +54,75 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # The restic and secret packages have Windows-specific behaviour, so the
-      # suite is run natively rather than only cross-compiled.
+      # The restic and secret packages have Windows-specific behaviour, and so
+      # does internal/pathpolicy, which is where the fixed-disk rule lives. Those
+      # volume assertions cannot be written portably -- there is no drive table to
+      # read off Windows -- so this job is the only place they run at all, and
+      # they are deliberately absent rather than skipped elsewhere.
       - name: test
         run: go test ./...
+
+      # The unit tests cover the volume-type classifier, but they cannot build a
+      # DVD drive. This runs the real shipped binary against a real filesystem,
+      # which is the check that actually stands between a technician and a
+      # silently mistyped BACKUPPATH.
+      #
+      # Every case here is one a customer hit: a folder that does not exist yet
+      # (must be created, not refused), a file where a folder should be, a drive
+      # root, a path on a volume that is not there at all, and a network share.
+      - name: exercise validatepath on a real filesystem
+        shell: pwsh
+        run: |
+          $exe = "$env:GITHUB_WORKSPACE\validatepath.exe"
+          go build -o $exe ./cmd/validatepath
+
+          function Check($name, $path, $want) {
+            & $exe $path *> $null
+            $got = $LASTEXITCODE
+            if ($got -ne $want) {
+              throw "validatepath $name on '$path' exited $got, want $want"
+            }
+            Write-Host "ok  $name -> $got"
+          }
+
+          $root = Join-Path $env:RUNNER_TEMP 'vp'
+          New-Item -ItemType Directory -Path $root -Force | Out-Null
+
+          # Exists already: usable, and the runner temp is on a fixed disk.
+          $existing = Join-Path $root 'CustomerData'
+          New-Item -ItemType Directory -Path $existing -Force | Out-Null
+          Check 'existing folder' $existing 0
+
+          # Missing: created rather than refused. This is the case that used to
+          # install fine and then fail every backup.
+          $missing = Join-Path $root 'NotCreatedYet'
+          Check 'missing folder is created' $missing 0
+          if (-not (Test-Path $missing -PathType Container)) { throw "the folder was not created" }
+
+          # A file is not a folder, and must not be deleted to become one.
+          $file = Join-Path $root 'a-file'
+          Set-Content -Path $file -Value 'customer data'
+          Check 'file not a folder' $file 4
+          if (-not (Test-Path $file)) { throw "validatepath deleted a file" }
+
+          Check 'drive root' ($existing.Substring(0, 3)) 5
+          Check 'volume not mounted' 'Z:\CustomerData' 3
+          Check 'no path' '' 2
+
+          # A network share is refused before anything touches the network, so
+          # this is deterministic on a runner with no file server: the decision is
+          # made from the shape of the path, not by asking the share whether it is
+          # there. Asserting the *permitted* case would need a real share, which
+          # is what the joint session is for.
+          #
+          # The reason for refusing at all is that the service runs as
+          # LocalSystem: a share that opened perfectly for the technician can still
+          # fail every hourly backup because the machine account was never granted
+          # access, with nothing in a backup report to say where.
+          Check 'network share refused' '\\fileserver\CustomerData' 7
+          if (Test-Path '\\fileserver\CustomerData') {
+            throw "the share was somehow reached; the refusal is meant to happen before any access"
+          }
 
   build:
     name: build Windows binaries
@@ -115,11 +180,34 @@ jobs:
           path: build/bin
 
       - name: install WiX
-        run: dotnet tool install --global wix --version 5.0.2
+        run: |
+          # The extensions must be *added* before -ext can find them; the tool
+          # install alone is not enough. Pinned to the same version as the tool.
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
 
       - name: build MSI
+        shell: bash
         # Util.wixext carries the service configuration elements in Product.wxs.
-        run: wix build installer/Product.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -bindpath build/bin/ -o SoftafriqueBackupAgent.msi
+        # The two named bind paths are the ones Product.wxs resolves the payload
+        # through. They are absolute because a relative bind path is resolved
+        # against the .wxs directory, and a wrong one silently yields an MSI with
+        # an empty Files table -- hence the size assertion below.
+        run: |
+          set -euo pipefail
+          wix build installer/Product.wxs -arch x64 \
+            -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
+            -bindpath "bin=${GITHUB_WORKSPACE}/build/bin" \
+            -bindpath "res=${GITHUB_WORKSPACE}/installer" \
+            -o SoftafriqueBackupAgent.msi
+
+          size=$(wc -c < SoftafriqueBackupAgent.msi)
+          echo "MSI size: $size bytes"
+          if [ "$size" -lt 5000000 ]; then
+            echo "::error::the MSI is only $size bytes; the payload was not embedded"
+            exit 1
+          fi
 
       - name: smoke test the MSI layout
         run: |
@@ -133,6 +221,73 @@ jobs:
           msiexec /x SoftafriqueBackupAgent.msi /qn
           if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "agent not removed" }
           Write-Host "MSI installs and uninstalls cleanly"
+
+      # TESTINSTALL=1 skips the folder check, which means the check itself was
+      # never exercised by the smoke test above -- and the folder check is the
+      # part with teeth. It is the only moment a human is present to fix a
+      # mistyped BACKUPPATH, and the DVD-drive bug got through it precisely
+      # because it was not tested. So install again for real.
+      #
+      # No TESTINSTALL and no ENROLLTOKENFILE: the folder check and the full
+      # layout run, and the service is installed but neither started nor
+      # enrolled, because both are gated on a token file. No gateway needed.
+      - name: install for real and let it create the backup folder
+        shell: pwsh
+        run: |
+          $backup = Join-Path $env:RUNNER_TEMP 'CustomerData'
+          if (Test-Path $backup) { Remove-Item -Recurse -Force $backup }
+
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'real.log',
+            "BACKUPPATH=`"$backup`""
+          )
+          if ($p.ExitCode -ne 0) {
+            $tail = (Get-Content real.log -Tail 30) -join "`n"
+            throw "install exited $($p.ExitCode):`n$tail"
+          }
+          if (-not (Test-Path $backup -PathType Container)) {
+            throw "the installer did not create $backup"
+          }
+          Write-Host "ok  the installer created $backup"
+
+          # The config the MSI wrote has to parse. This is checked on every build
+          # because a config the agent cannot load stops the service dead at three
+          # in the morning, and it is exactly the failure a placeholder in the
+          # template can cause.
+          $cfg = "$env:ProgramData\SoftafriqueBackupAgent\config.yaml"
+          if (-not (Test-Path $cfg)) { throw "no config.yaml was written" }
+          $text = Get-Content $cfg -Raw
+          foreach ($ph in '[DATADIR]', '[STATUSFILE]', '[LOGFILE]', '[BACKUPPATH]') {
+            if ($text.Contains($ph)) { throw "config.yaml still contains the placeholder $ph" }
+          }
+          if (-not ($text -match '(?m)^allow_unc:\s*false\s*$')) {
+            throw "config.yaml does not ship with the network-share opt-in off:`n$text"
+          }
+          Write-Host "ok  config.yaml was written with its placeholders substituted"
+
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/x', 'SoftafriqueBackupAgent.msi', '/qn'
+          )
+          if ($p.ExitCode -ne 0) { throw "uninstall exited $($p.ExitCode)" }
+
+          # A mistyped path has to stop a *fresh* install, not survive it. This
+          # uninstalls first on purpose: reinstalling the same version would be a
+          # repair, and asserting that a repair re-runs the check would be testing
+          # Windows Installer rather than the check.
+          #
+          # A share is the case that matters, because nothing about it is wrong.
+          # It is a real path on a real server; it is simply not allowed unless a
+          # person has said so, and the log has to say that rather than fail with
+          # something a technician cannot act on.
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'refused.log',
+            'BACKUPPATH=\\fileserver\CustomerData'
+          )
+          if ($p.ExitCode -eq 0) { throw "the installer accepted a network share" }
+          if (-not ((Get-Content refused.log -Raw) -match 'network share')) {
+            throw "the install failed for the wrong reason; the log does not mention the share"
+          }
+          Write-Host "ok  a network share is refused, and the log says why"
 
       - uses: actions/upload-artifact@v4
         with:

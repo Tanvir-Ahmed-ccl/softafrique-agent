@@ -102,11 +102,6 @@ type Options struct {
 	// for manual development and break-glass recovery; production devices are
 	// enrolled and use Password.
 	PasswordFile string
-	// AllowInit permits `restic init` when the repository is missing. Off by
-	// default: the gateway creates the repository at enrollment, and an
-	// unexpected init would create a second, empty repository at a mistyped
-	// path and split the customer's history in two.
-	AllowInit bool
 	// Logger receives restic's own output. It may be nil.
 	Logger *slog.Logger
 }
@@ -363,35 +358,33 @@ func repoErr(op string, err error, sink *stderrSink) error {
 	return &RepoError{Op: op, Code: code, Reason: Reason(code), Detail: detail}
 }
 
-// EnsureRepo makes sure the repository is usable.
+// EnsureRepo makes sure the repository is usable, and never creates one.
 //
 // In 0.1.0 this ran `restic init` after *any* failure to list snapshots, which
 // meant a wrong device id created a brand new empty repository at the wrong path
-// (splitting the customer's history) and a rejected password was reported as
-// "repo unreachable and init failed". Now init only happens on restic's
-// exit code 10, and only when the caller has explicitly allowed it.
+// -- splitting the customer's history in two -- and a rejected password was
+// reported as "repo unreachable and init failed". The fix went through two
+// stages: init only on restic's exit code 10, and only when a config file asked
+// for it. Neither stage is needed now, because the gateway creates the
+// repository server-side at enrollment and fails the enrollment if restic init
+// does not succeed. So there is no init code path left here at all.
+//
+// A missing repository is therefore a fact about the world, not something to
+// work around: it is reported, and the agent stops. TestNoInitCodePathExists
+// keeps that true if this function is ever tempted back open.
 func (r *Restic) EnsureRepo(ctx context.Context) error {
-	if err := r.Ping(ctx); err == nil {
+	err := r.Ping(ctx)
+	if err == nil {
 		return nil
-	} else if !IsRepoMissing(err) {
-		return err
 	}
-	if !r.opts.AllowInit {
+	if IsRepoMissing(err) {
 		return &RepoError{
 			Op:     "check repository",
 			Code:   ExitRepoMissing,
-			Reason: Reason(ExitRepoMissing) + " and this agent is not permitted to create it",
+			Reason: Reason(ExitRepoMissing) + "; the gateway creates it at enrollment, so this is a gateway or enrollment problem, not something to fix by initialising",
 		}
 	}
-	r.log.Info("repository does not exist yet, initialising", "repository", r.opts.Repository)
-	sink := newStderrSink(r.log, r.opts.Repository)
-	cmd := r.newCmd(ctx, r.args("init")...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = sink
-	if err := cmd.Run(); err != nil {
-		return repoErr("init", err, sink)
-	}
-	return nil
+	return err
 }
 
 // Ping verifies the repository is reachable and the password works.

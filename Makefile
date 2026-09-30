@@ -48,21 +48,45 @@ validatepath:
 dist: build-windows
 	@ls -lh build/bin
 
-## msi: build the unsigned pilot MSI (requires wix on PATH, Windows only)
+## wix-preflight: install the pinned WiX toolset and its two extensions
 ##
-## Both extensions are required: UI.wixext for WixShell and WixQuietExec, and
-## Util.wixext for the service configuration. Product.wxs uses both, and a
-## missing extension surfaces as a wall of unresolved-element errors rather than
-## a useful message.
+## The -ext flags below can only *find* an extension that has already been added
+## to the WiX extension folder. Without this step the build fails on a wall of
+## unresolved-element errors, which says nothing about the real cause. The
+## extensions are pinned to the same version as the tool so they cannot drift
+## apart and fail to load.
+WIX_VERSION ?= 5.0.2
 WIXEXT = -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
 
-## msi: build the unsigned pilot MSI
+## wix-preflight: install WiX and both .wixext extensions (Windows only)
+wix-preflight:
+	DOTNET_ROLL_FORWARD=Major dotnet tool install --global wix --version $(WIX_VERSION)
+	wix extension add -g WixToolset.UI.wixext/$(WIX_VERSION)
+	wix extension add -g WixToolset.Util.wixext/$(WIX_VERSION)
+
+# Product.wxs refers to the payload through two *named* bind paths, and both have
+# to be passed here. The paths are absolute on purpose: WiX resolves a relative
+# bind path against the .wxs file's own directory rather than the directory the
+# command runs in, and getting that wrong does not fail the build -- it quietly
+# produces an MSI with an empty Files table. That is why msi asserts a size.
+WIXBIND = -bindpath bin=$(CURDIR)/build/bin -bindpath res=$(CURDIR)/installer
+
+## msi: build the unsigned pilot MSI (requires wix on PATH, Windows only)
 msi: build-windows
-	cd installer && wix build -arch x64 $(WIXEXT) -o SoftafriqueBackupAgent-$(VERSION)-unsigned.msi
+	wix build installer/Product.wxs -arch x64 $(WIXEXT) $(WIXBIND) \
+		-o installer/SoftafriqueBackupAgent-$(VERSION)-unsigned.msi
+	@size=$$(wc -c < installer/SoftafriqueBackupAgent-$(VERSION)-unsigned.msi); \
+		echo "MSI size: $$size bytes"; \
+		if [ "$$size" -lt 5000000 ]; then \
+			echo "ERROR: the MSI is only $$size bytes, which means the payload was not"; \
+			echo "embedded. Check that build/bin holds all three exes and that WIXBIND"; \
+			echo "points at it. An empty Files table installs and does nothing."; \
+			exit 1; \
+		fi
 
 ## msi-layout: resolve the WiX source without producing an MSI, for review
 msi-layout:
-	cd installer && wix build -arch x64 $(WIXEXT) -bindpath ../build/bin/ -o nul
+	wix build installer/Product.wxs -arch x64 $(WIXEXT) $(WIXBIND) -o nul
 
 ## clean: remove build output
 clean:

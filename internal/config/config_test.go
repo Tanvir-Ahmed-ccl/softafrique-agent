@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -106,8 +107,69 @@ func TestLoadDefaultsApplied(t *testing.T) {
 	if !cfg.Stats() {
 		t.Error("repo usage readings should default to on")
 	}
-	if cfg.AutoInit {
-		t.Error("auto_init must default to off: the gateway creates the repository")
+	if cfg.AllowUNC {
+		t.Error("allow_unc must default to off: a share is reached as the machine account, not the technician")
+	}
+}
+
+// The gateway creates the repository at enrollment, and enrollment fails if its
+// restic init does not. There is therefore no reason for the agent to be able to
+// create one, and no config key that could ask it to.
+func TestThereIsNoAutoInitKeyToActOn(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+repo: "rest:https://backup.softafrique.net/dev-01"
+auto_init: true
+`), nil)
+	if err != nil {
+		t.Fatalf("a config carrying the retired auto_init key should still load: %v", err)
+	}
+	if _, ok := reflect.TypeOf(*cfg).FieldByName("AutoInit"); ok {
+		t.Error("config.Config still has an AutoInit field; the agent must not be able to create a repository")
+	}
+	// The key is a no-op, not a setting: nothing in the loaded config records
+	// that it was true, so nothing can act on it.
+	if reflect.ValueOf(*cfg).NumField() == 0 {
+		t.Error("Config has no fields, which cannot be right")
+	}
+}
+
+// A device upgrading in place keeps the config.yaml it was installed with,
+// because the MSI writes it with NeverOverwrite. A released build shipped
+// auto_init, so every upgraded device has that key on disk. Refusing to start
+// because of it would turn "this option is gone" into "this device is
+// unprotected", which is the worst possible trade for a backup agent.
+func TestARetiredKeyDoesNotStopAnUpgradedDeviceFromStarting(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+server: "https://backup.softafrique.net/api/v1"
+repo: "rest:https://backup.softafrique.net/dev-01"
+data_dir: "C:\\ProgramData\\SoftafriqueBackupAgent"
+include:
+  - 'D:\CustomerData'
+auto_init: false
+verbose: false
+`), nil)
+	if err != nil {
+		t.Fatalf("a shipped 0.2.0 config with auto_init in it must still load: %v", err)
+	}
+	if len(cfg.Include) != 1 || cfg.Include[0] != `D:\CustomerData` {
+		t.Errorf("the rest of the config was lost while dropping the retired key: %v", cfg.Include)
+	}
+}
+
+// Tolerating a retired key must not become tolerating everything. A typo in a
+// key nobody reads is how 0.1.0 wrote credentials somewhere without an ACL, and
+// it stays fatal even when a retired key happens to be present in the same file.
+func TestATypoIsStillFatalAlongsideARetiredKey(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+repo: "rest:https://backup.softafrique.net/dev-01"
+auto_init: false
+data-dir: "C:\\ProgramData\\Elsewhere"
+`), nil)
+	if err == nil {
+		t.Fatal("a mistyped key must still be refused even with a retired key present")
+	}
+	if !strings.Contains(err.Error(), "data-dir") {
+		t.Errorf("the error should name the offending key, got: %v", err)
 	}
 }
 
