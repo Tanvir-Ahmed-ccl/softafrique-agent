@@ -132,9 +132,10 @@ the customer PC needs nothing else installed.
 
 ## Installing on a customer machine
 
-1. Deploy the MSI from Tactical RMM with the `ENROLLTOKEN` property set to a
-   one-time token from the dashboard. The MSI runs enrollment itself and never
-   writes the token to disk.
+1. Deploy the MSI from Tactical RMM with the `ENROLLTOKENFILE` property set to
+   a one-time token file. The MSI reads the token from that file, enrolls, and
+   the agent deletes the file once the token is consumed, so the token itself is
+   never written into the install directory.
 2. Confirm with the health-check script:
 
 ```powershell
