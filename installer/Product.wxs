@@ -110,8 +110,7 @@
                             SecondFailureActionType="restart"
                             ThirdFailureActionType="none"
                             RestartServiceDelayInSeconds="60"
-                            ResetPeriodInDays="1"
-                            FailureActionsOnNonCrashFailures="no" />
+                            ResetPeriodInDays="1" />
       </ServiceInstall>
 
       <!-- Start is deliberately not set. InstallServices would start the
@@ -162,9 +161,9 @@
         <util:PermissionEx User="Administrators" GenericAll="yes" Inheritable="yes" />
         <!-- PermissionEx writes to the LockPermissions table, which is only
              applied if the component is keypath'd on the folder itself. -->
-        <RegistryKey Root="HKLM" Key="SOFTWARE\Softafrique\BackupAgent">
+        <util:RegistryKey Root="HKLM" Key="SOFTWARE\Softafrique\BackupAgent">
           <RegistryValue Name="DataDir" Type="string" Value="[DATAFOLDER]" KeyPath="yes" />
-        </RegistryKey>
+        </util:RegistryKey>
       </CreateFolder>
     </Component>
 
@@ -187,12 +186,14 @@
       NeverOverwrite and puts the value where a person can read and change it.
     -->
     <Component Id="ConfigFile" Guid="6D9B7FD5-4A82-4EA6-9FB2-7B5C4DAF0C66" Directory="DATAFOLDER">
-      <util:ConfigurableTextFile Id="ConfigFileName"
-                                 Name="config.yaml"
-                                 Source="!(bindpath.res)\config.yaml.template"
-                                 Encoding="UTF-8"
-                                 NeverOverwrite="yes"
-                                 Configuration="DATADIR=[DATAFOLDER];STATUSFILE=[STATUSFILE];LOGFILE=[LOGFILE];BACKUPPATH=[BACKUPPATH]" />
+      <File Id="ConfigFileName"
+            Name="config.yaml"
+            Source="!(bindpath.res)\config.yaml.template"
+            KeyPath="yes">
+        <util:ConfigurableTextFile Encoding="UTF-8"
+                                   NeverOverwrite="yes"
+                                   Configuration="DATADIR=[DATAFOLDER];STATUSFILE=[STATUSFILE];LOGFILE=[LOGFILE];BACKUPPATH=[BACKUPPATH]" />
+      </File>
     </Component>
 
     <!-- ================= properties ================= -->
@@ -204,13 +205,24 @@
          validatepath.exe. -->
     <Property Id="BACKUPPATH" Value="C:\SoftafriqueBackup" />
 
-    <Property Id="STATUSFILE" Value="[DATAFOLDER]status.json" />
-    <Property Id="LOGFILE" Value="[DATAFOLDER]agent.log" />
+    <!-- Set from the execute sequence rather than through a Value attribute.
+         A Property/@Value is a string literal, not a formatted field, so
+         Value="[DATAFOLDER]status.json" would put the brackets in the file on
+         disk and the agent would create "[DATAFOLDER]status.json" relative to
+         its working directory. WiX says as much (WIX1077). SetProperty does
+         format, and CostFinalize is the last stop before the config file is
+         written, so this has to sit there and no later. -->
+    <Property Id="STATUSFILE" Secure="yes" />
+    <Property Id="LOGFILE" Secure="yes" />
+    <SetProperty Id="STATUSFILE" Value="[DATAFOLDER]status.json"
+                 Before="CostFinalize" Sequence="execute" />
+    <SetProperty Id="LOGFILE" Value="[DATAFOLDER]agent.log"
+                 Before="CostFinalize" Sequence="execute" />
 
     <!-- The path to a one-time enrollment token written by the RMM. Only the
          path travels through the MSI; the token itself is read and deleted by
          the agent. -->
-    <Property Id="ENROLLTOKENFILE" />
+    <Property Id="ENROLLTOKENFILE" Secure="yes" />
 
     <!-- Set on the CI smoke-test command line so nothing touches the service or
          the network. -->
@@ -266,14 +278,14 @@
       nothing.
     -->
     <CustomAction Id="ValidateBackupFolder"
-                  BinaryKey="WixCA"
+                  BinaryRef="WixCA"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Return="check"
                   Impersonate="no" />
 
     <CustomAction Id="EnrollDevice"
-                  BinaryKey="WixCA"
+                  BinaryRef="WixCA"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Return="check"
@@ -283,7 +295,7 @@
          it itself after enrolling, and a hand-typed install with no token
          deliberately leaves it stopped for an operator to enroll first. -->
     <CustomAction Id="StartEnrolledService"
-                  BinaryKey="WixCA"
+                  BinaryRef="WixCA"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Return="ignore"
@@ -298,7 +310,6 @@
            scheduled run already has credentials. InstallServices is skipped on
            this path because the service was never started. -->
       <Custom Action="EnrollDevice" After="ValidateBackupFolder"
-              Before="StartServices"
               Condition="NOT TESTINSTALL AND NOT REMOVE AND ENROLLTOKENFILE" />
 
       <Custom Action="StartEnrolledService" After="StartServices"
