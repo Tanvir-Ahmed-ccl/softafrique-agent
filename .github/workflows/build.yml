@@ -132,14 +132,30 @@ jobs:
           # happen, and GitHub Actions runs this step with
           # $ErrorActionPreference='Stop', so Test-Path on an unresolvable share
           # raises a terminating error and fails the step over its own probe.
-          $shareOut = (& $exe '\\fileserver\CustomerData' 2>&1) -join "`n"
-          if ($LASTEXITCODE -ne 7) {
-            throw "a share should still be refused on the second call, got $LASTEXITCODE"
+          #
+          # The message is captured with Start-Process rather than 2>&1 for the
+          # same reason. A native command's stderr becomes ErrorRecord objects when
+          # it is merged into the output stream, and with ErrorActionPreference set
+          # to Stop that marks the whole step failed even when every assertion
+          # passed -- which is what this did: seven "ok" lines and then exit 1.
+          # Redirecting to a file is the one form that keeps stderr a string.
+          $errFile = Join-Path $env:RUNNER_TEMP 'validatepath-share.err'
+          $p = Start-Process $exe -Wait -PassThru -NoNewWindow `
+            -RedirectStandardError $errFile `
+            -ArgumentList '\\fileserver\CustomerData'
+          if ($p.ExitCode -ne 7) {
+            throw "a share should still be refused, got $($p.ExitCode)"
           }
+          $shareOut = Get-Content $errFile -Raw
           if ($shareOut -notmatch 'network share') {
             throw "the refusal did not name the share, so it was not the policy that refused it:`n$shareOut"
           }
           Write-Host 'ok  a share is refused by the policy, which never resolves it'
+
+          # Explicit, because pwsh -Command derives the step's exit code from the
+          # last command rather than from whether the script finished. Every
+          # assertion above is a throw, so reaching this line means they all held.
+          exit 0
 
   build:
     name: build Windows binaries
