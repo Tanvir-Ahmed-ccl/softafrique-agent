@@ -101,9 +101,13 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
+	// Every message names the volume through Kind.String(), including the unmounted
+	// drive. This branch used to build its own wording without the kind, so the
+	// message both failed the "names the volume" invariant and interpolated an empty
+	// drive name -- the path already says Z:, so the extra VolumeName call added
+	// nothing but a hole in the sentence.
 	if e.Kind == KindNoRoot {
-		return fmt.Sprintf("%s is on drive %s, which is not mounted; check the drive letter",
-			e.Path, VolumeName(e.Path))
+		return fmt.Sprintf("%s is on %s; check the drive letter", e.Path, e.Kind)
 	}
 	msg := fmt.Sprintf("%s is on %s; the folder to protect must be on a fixed disk", e.Path, e.Kind)
 	if e.OptIn != "" {
@@ -196,12 +200,4 @@ func IsUNC(path string) bool {
 	// \folder is a path rooted on the current drive, not a share, and needs a
 	// server name before the separator to be one.
 	return rest != "" && !strings.HasPrefix(rest, `\`) && strings.Contains(rest, `\`)
-}
-
-// VolumeName is the drive or share a path belongs to, for messages.
-//
-// Split out because filepath.VolumeName does this differently per platform, and
-// a message that says the wrong thing about a path is worse than no message.
-func VolumeName(path string) string {
-	return volumeName(path)
 }

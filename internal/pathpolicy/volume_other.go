@@ -16,10 +16,3 @@ package pathpolicy
 // A test that wants the volume rule checked asserts it in a file built only for
 // Windows, so it is skipped with a visible skip rather than passing quietly.
 func classifyVolume(string) (Kind, bool) { return KindUnknown, false }
-
-func volumeName(path string) string {
-	if i := len(path); i > 0 && path[i-1] == '/' {
-		return "/"
-	}
-	return ""
-}

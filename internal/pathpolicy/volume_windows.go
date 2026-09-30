@@ -64,5 +64,3 @@ func volumeRoot(path string) string {
 	}
 	return vol + `\`
 }
-
-func volumeName(path string) string { return filepath.VolumeName(path) }

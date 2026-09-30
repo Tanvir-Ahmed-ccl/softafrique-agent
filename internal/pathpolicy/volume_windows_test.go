@@ -4,7 +4,6 @@ package pathpolicy
 
 import (
 	"errors"
-	"strings"
 	"testing"
 )
 
@@ -74,28 +73,6 @@ func TestADriveLetterWithNoVolumeIsReportedAsUnmounted(t *testing.T) {
 	// somebody to pass a flag that cannot help.
 	if perr.OptIn != "" {
 		t.Errorf("OptIn = %q, want empty: no switch fixes a drive letter that is not mounted", perr.OptIn)
-	}
-}
-
-// Every refusal has to name the path and what is wrong with it. A status file
-// that says "policy violation" is a support ticket with no way to close it.
-func TestEveryRefusalNamesThePathAndTheVolume(t *testing.T) {
-	const path = `D:\Customer\Data`
-	for kind := KindUnknown; kind <= KindNoRoot; kind++ {
-		if kind == KindFixed {
-			continue
-		}
-		err := decide(path, kind, false, AllowUNCFlag)
-		if err == nil {
-			continue
-		}
-		msg := err.Error()
-		if !strings.Contains(msg, path) {
-			t.Errorf("%v: message %q does not name the path", kind, msg)
-		}
-		if !strings.Contains(msg, kind.String()) {
-			t.Errorf("%v: message %q does not say what the volume is", kind, msg)
-		}
 	}
 }
 

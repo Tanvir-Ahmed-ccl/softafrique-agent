@@ -2,6 +2,7 @@ package pathpolicy
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -82,5 +83,40 @@ func TestIsUnmountedOnlyMatchesAnEmptyVolume(t *testing.T) {
 	}
 	if IsUnmounted(errors.New("something else")) {
 		t.Error("an unrelated error was reported as unmounted")
+	}
+}
+
+// Every refusal has to name the path and say what kind of volume it landed on. A
+// status file that says "policy violation" is a support ticket nobody can close.
+//
+// This calls decide rather than RequireFixed because decide is the whole rule and
+// has no platform in it, so the assertion runs on a developer's macOS machine and
+// not only on the Windows CI runner. It is here because that is exactly what was
+// missing: the unmounted-drive message built its own wording and never went
+// through Kind.String(), so the defect could not be seen until a Windows job ran
+// it. One kind getting its own sentence is how that happened.
+func TestEveryRefusalNamesThePathAndTheVolume(t *testing.T) {
+	const path = `D:\Customer\Data`
+	for kind := KindUnknown; kind <= KindNoRoot; kind++ {
+		if kind == KindFixed {
+			continue
+		}
+		err := decide(path, kind, false, AllowUNCFlag)
+		if err == nil {
+			t.Errorf("%v was allowed; only a fixed disk is", kind)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, path) {
+			t.Errorf("%v: message %q does not name the path", kind, msg)
+		}
+		if !strings.Contains(msg, kind.String()) {
+			t.Errorf("%v: message %q does not say what the volume is", kind, msg)
+		}
+		// A gap in the sentence is how "is on drive , which is not mounted" shipped:
+		// the kind is present but something interpolated to nothing beside it.
+		if strings.Contains(msg, "  ") || strings.Contains(msg, "is on ;") {
+			t.Errorf("%v: message %q has a hole in it", kind, msg)
+		}
 	}
 }
