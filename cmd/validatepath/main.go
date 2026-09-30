@@ -83,23 +83,19 @@ func validate(args []string) int {
 		return 6
 	}
 
-	// A drive root is checked before anything is created. "Create the folder"
-	// must never mean "create a directory at the root of a volume", and backing
-	// up a whole drive by accident is expensive and slow enough to look like an
-	// attack.
-	if isVolumeRoot(abs) {
-		fmt.Fprintf(os.Stderr, "%s is a drive root; back up a specific customer folder instead\n", abs)
-		return 5
-	}
-
-	// The volume type is checked before anything is created, so a DVD drive is
-	// refused as a DVD drive rather than as a folder that happens to be missing.
-	// GetDriveType reports the type of the drive letter itself, so this works
-	// with no disc in the tray.
+	// What kind of volume this is gets decided before the drive-root check below.
+	// Both are refusals, but the volume type is the one that has to be named: a
+	// technician who pointed the installer at D:\ on the machine whose D: is a
+	// DVD needs to hear "that is a DVD drive", because "back up a specific folder
+	// instead" sends them away with a fix that cannot work -- the subfolder they
+	// pick is on the same disc.
 	//
-	// A drive letter with nothing mounted gets its own code, because "Z: is not
-	// a drive" and "that is a DVD drive" are different mistakes with different
-	// fixes and a technician should not have to guess which one they made.
+	// A share root is why this was in the wrong order. Windows treats
+	// \\server\share as a volume in its own right, so filepath.VolumeName returns
+	// the whole of \\fileserver\CustomerData and the root check claimed it first.
+	// The installer was told to back up a specific folder on a path that has no
+	// subfolder to pick, and the share rule -- the one an operator needs to hear
+	// about, because it is the one with a flag behind it -- was never consulted.
 	//
 	// The rule itself lives in internal/pathpolicy, which the agent enforces too.
 	// A copy here would be a rule that could drift from the one the agent
@@ -111,6 +107,17 @@ func validate(args []string) int {
 		}
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 7
+	}
+
+	// A drive root is checked before anything is created. "Create the folder"
+	// must never mean "create a directory at the root of a volume", and backing
+	// up a whole drive by accident is expensive and slow enough to look like an
+	// attack. A share root gets here only with -allow-unc, and refusing it here is
+	// right: opting in to backing up a share is not opting in to backing up all
+	// of it.
+	if isVolumeRoot(abs) {
+		fmt.Fprintf(os.Stderr, "%s is a drive root; back up a specific customer folder instead\n", abs)
+		return 5
 	}
 
 	info, err := os.Stat(abs)
