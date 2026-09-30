@@ -2,79 +2,18 @@
 
 package pathpolicy
 
-import (
-	"errors"
-	"testing"
-)
+import "testing"
 
-// The volume half of the rule needs Windows, so this is the only place it is
-// asserted at all. CI builds and runs it on a Windows runner; on a developer
-// machine this file does not exist, which is why policy_test.go carries the share
-// half and says so.
+// What is left here is genuinely about Windows: reading a drive type, and turning
+// a path into the root string GetDriveType wants.
 //
-// The assertions go through decide rather than through RequireFixed with real
-// paths. "D: is refused" would pass on a laptop with no DVD drive and fail on a
-// build server where D: is a second fixed disk, so a test written that way is a
-// test about the machine. This one is about the rule.
-
-// The whole table, because the original bug was a type nobody had thought about.
-func TestOnlyAFixedDiskIsAllowed(t *testing.T) {
-	const path = `X:\Customer\Data`
-	allowed := map[Kind]bool{KindFixed: true}
-	for kind := KindUnknown; kind <= KindNoRoot; kind++ {
-		err := decide(path, kind, false, AllowUNCFlag)
-		if allowed[kind] {
-			if err != nil {
-				t.Errorf("%v was refused: %v", kind, err)
-			}
-			continue
-		}
-		if err == nil {
-			t.Errorf("%v was allowed; the folder to protect must be on a fixed disk", kind)
-		}
-	}
-}
-
-// The opt-in exists for a network share and for nothing else. This is the test
-// that keeps -allow-unc from turning into a general "accept any volume" switch,
-// which is how a DVD drive gets accepted and then fails every backup with "device
-// is not ready" hours later.
-func TestTheShareOptInDoesNotAllowOtherVolumeTypes(t *testing.T) {
-	const path = `D:\Customer\Data`
-	for kind := KindUnknown; kind <= KindNoRoot; kind++ {
-		if kind == KindNetwork {
-			continue
-		}
-		if err := decide(path, kind, true, AllowUNCFlag); err == nil {
-			t.Errorf("%v was allowed with the share opt-in set", kind)
-		}
-	}
-	if err := decide(path, KindNetwork, true, AllowUNCFlag); err != nil {
-		t.Errorf("a share with the opt-in was refused: %v", err)
-	}
-	if err := decide(path, KindNetwork, false, AllowUNCFlag); err == nil {
-		t.Error("a share without the opt-in was allowed")
-	}
-}
-
-// A drive letter with no volume is a mistyped letter, and gets the kind that says
-// so, because "Z: is not a drive" and "that is a DVD drive" are different
-// mistakes with different fixes.
-func TestADriveLetterWithNoVolumeIsReportedAsUnmounted(t *testing.T) {
-	err := decide(`Z:\Customer\Data`, KindNoRoot, false, AllowUNCFlag)
-	var perr *Error
-	if !errors.As(err, &perr) {
-		t.Fatalf("err = %v, want a *Error", err)
-	}
-	if !IsUnmounted(err) {
-		t.Error("an unmounted drive letter was not reported as unmounted")
-	}
-	// There is no opt-in for a drive that is not there, so offering one would tell
-	// somebody to pass a flag that cannot help.
-	if perr.OptIn != "" {
-		t.Errorf("OptIn = %q, want empty: no switch fixes a drive letter that is not mounted", perr.OptIn)
-	}
-}
+// The rule itself -- which volume types are allowed, what each refusal says, and
+// what the share opt-in does and does not allow -- is asserted in policy_test.go,
+// which is not platform-gated. That is not tidiness. decide takes the
+// classification as an argument, so those assertions have no platform in them, and
+// leaving them here meant a mistake in them could not be seen until a Windows job
+// ran: a message that dropped the volume, and a test that required a fixed disk to
+// be refused, both reached a tagged build that way.
 
 // A UNC path is caught by the textual test before the drive table is consulted,
 // which is what lets the share half work on a machine where the share is
@@ -104,5 +43,16 @@ func TestClassifyVolumeReadsTheSystemDiskAsFixed(t *testing.T) {
 	}
 	if kind != KindFixed {
 		t.Errorf("C: classified as %v, want a fixed disk", kind)
+	}
+}
+
+// Windows can always classify, unlike every other platform, so a caller relying on
+// the "cannot tell" path gets an answer it did not ask for. The shipped build is
+// the one that matters, and it is this one.
+func TestClassifyVolumeIsAlwaysDecidableOnWindows(t *testing.T) {
+	for _, path := range []string{`C:\Customer\Data`, `Z:\Customer\Data`, `\\server\share\x`, `relative\path`, ``} {
+		if _, decidable := classifyVolume(path); !decidable {
+			t.Errorf("classifyVolume(%q) reported it could not tell", path)
+		}
 	}
 }

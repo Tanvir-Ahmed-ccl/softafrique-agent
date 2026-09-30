@@ -120,3 +120,73 @@ func TestEveryRefusalNamesThePathAndTheVolume(t *testing.T) {
 		}
 	}
 }
+
+// The opt-in exists for a network share and for nothing else. This is the test
+// that keeps -allow-unc from turning into a general "accept any volume" switch,
+// which is how a DVD drive gets accepted and then fails every backup with "device
+// is not ready" hours later.
+//
+// A fixed disk stays allowed, because the switch is not what allows it: it would
+// be allowed with the switch off too.
+func TestTheShareOptInDoesNotAllowOtherVolumeTypes(t *testing.T) {
+	const path = `D:\Customer\Data`
+	for kind := KindUnknown; kind <= KindNoRoot; kind++ {
+		if kind == KindNetwork || kind == KindFixed {
+			continue
+		}
+		if err := decide(path, kind, true, AllowUNCFlag); err == nil {
+			t.Errorf("%v was allowed with the share opt-in set", kind)
+		}
+	}
+	if err := decide(path, KindNetwork, true, AllowUNCFlag); err != nil {
+		t.Errorf("a share with the opt-in was refused: %v", err)
+	}
+	if err := decide(path, KindNetwork, false, AllowUNCFlag); err == nil {
+		t.Error("a share without the opt-in was allowed")
+	}
+	if err := decide(path, KindFixed, false, AllowUNCFlag); err != nil {
+		t.Errorf("a fixed disk was refused with the opt-in off: %v", err)
+	}
+}
+
+// A drive letter with no volume is a mistyped letter, and gets the kind that says
+// so, because "Z: is not a drive" and "that is a DVD drive" are different
+// mistakes with different fixes.
+func TestADriveLetterWithNoVolumeIsReportedAsUnmounted(t *testing.T) {
+	err := decide(`Z:\Customer\Data`, KindNoRoot, false, AllowUNCFlag)
+	var perr *Error
+	if !errors.As(err, &perr) {
+		t.Fatalf("err = %v, want a *Error", err)
+	}
+	if !IsUnmounted(err) {
+		t.Error("an unmounted drive letter was not reported as unmounted")
+	}
+	// There is no opt-in for a drive that is not there, so offering one would tell
+	// somebody to pass a flag that cannot help.
+	if perr.OptIn != "" {
+		t.Errorf("OptIn = %q, want empty: no switch fixes a drive letter that is not mounted", perr.OptIn)
+	}
+}
+
+// Only a fixed disk is allowed, and this asks the rule rather than the machine: a
+// test that says "D: is refused" passes on a laptop with no DVD drive and fails on
+// a build server where D: is a second fixed disk. decide takes the classification
+// as an argument precisely so the table can be asserted without asking the machine
+// what drives it happens to have.
+//
+// The whole table, because the original bug was a type nobody had thought about.
+func TestOnlyAFixedDiskIsAllowed(t *testing.T) {
+	const path = `X:\Customer\Data`
+	for kind := KindUnknown; kind <= KindNoRoot; kind++ {
+		err := decide(path, kind, false, AllowUNCFlag)
+		if kind == KindFixed {
+			if err != nil {
+				t.Errorf("a fixed disk was refused: %v", err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%v was allowed; the folder to protect must be on a fixed disk", kind)
+		}
+	}
+}

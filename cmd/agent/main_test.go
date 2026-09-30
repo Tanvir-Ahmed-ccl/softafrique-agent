@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -62,12 +63,44 @@ func TestResolveTokenRefusesAWorldReadableFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("tok-abc123\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if runtime.GOOS == "windows" {
+		// 0o644 is a POSIX premise that says nothing about a Windows ACL: Go
+		// synthesises the mode and the DACL is what actually grants access. A file
+		// written this way is readable by the temp directory's trustees -- the
+		// runner account, SYSTEM and Administrators -- so refusing it would be
+		// wrong, and a file that is not loose must not be reported as loose.
+		//
+		// The case that has to be refused is a file an ordinary user can read, so
+		// widen the DACL to grant BUILTIN\Users and assert on that. This is the
+		// Windows half of the guarantee, and it was untested: the test that shipped
+		// with it asserted the POSIX premise, passed on Linux, and failed on the
+		// Windows runner for exactly the reason above.
+		grantUsersRead(t, path)
+		_, _, err := resolveToken("", path)
+		if err == nil {
+			t.Fatal("a token file the Users group can read is a token in the clear")
+		}
+		if !strings.Contains(err.Error(), "readable by") {
+			t.Errorf("error = %q, want it to name who can read the file", err)
+		}
+		return
+	}
 	_, _, err := resolveToken("", path)
 	if err == nil {
 		t.Fatal("a token file other users can read is a token in the clear")
 	}
 	if !strings.Contains(err.Error(), "readable by other users") {
 		t.Errorf("error = %q, want it to explain the problem", err)
+	}
+}
+
+// grantUsersRead gives the built-in Users group read access, which is what a
+// "world-readable" file means on Windows.
+func grantUsersRead(t *testing.T, path string) {
+	t.Helper()
+	out, err := exec.Command("icacls", path, "/grant", `BUILTIN\Users:(R)`).CombinedOutput()
+	if err != nil {
+		t.Skipf("could not widen the ACL to test the Windows path: %v: %s", err, out)
 	}
 }
 
