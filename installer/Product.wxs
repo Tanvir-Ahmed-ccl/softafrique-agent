@@ -35,6 +35,7 @@
     docs/OPERATIONS.md.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <Package Name="Softafrique Backup Agent"
@@ -289,28 +290,48 @@
 
     <!-- ================= custom actions ================= -->
     <!--
-      Both are Type 34/ deferred, run in the SYSTEM context and use
-      WixQuietExec, so a return code of 1 fails the install instead of being
-      logged and ignored. That matters: an install that "succeeded" while
-      enrollment failed would leave a machine that looks deployed and protects
-      nothing.
+      All four are deferred, run in the SYSTEM context and use WixQuietExec, so
+      a non-zero exit fails the install instead of being logged and ignored.
+      That matters: an install that "succeeded" while enrollment failed would
+      leave a machine that looks deployed and protects nothing.
+
+      Deferred is not a stylistic choice. Enrollment seals the repository
+      credentials with DPAPI, which is per-user, and the service runs as
+      LocalSystem. If enrollment ran as the interactive user, the blob would be
+      sealed for that user and the service could not read it, so the device
+      would enrol and then fail every backup. The same applies to writing the
+      config, whose directory is SYSTEM and Administrators only.
+
+      Two v5 details are load-bearing here:
+
+        * The CA binary is Wix4UtilCA_X64, not WixCA. WiX renamed it; the
+          converter says so explicitly when it rewrites a v3 package. There is
+          no WixCA in v5, which is why the linker could not resolve it.
+        * Each action names its command property. A deferred action cannot read
+          properties, so MSI hands it the value of the property named in
+          Property= as CustomActionData, and WixQuietExec reads CustomActionData
+          in preference to WixQuietExec64CmdLine. Without Property= the command
+          line would arrive empty and the action would succeed at nothing.
     -->
     <CustomAction Id="WriteConfig"
-                  BinaryRef="WixCA"
+                  Property="WRITECONFIGCMD"
+                  BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Return="check"
                   Impersonate="no" />
 
     <CustomAction Id="ValidateBackupFolder"
-                  BinaryRef="WixCA"
+                  Property="VALIDATEFOLDERCMD"
+                  BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Return="check"
                   Impersonate="no" />
 
     <CustomAction Id="EnrollDevice"
-                  BinaryRef="WixCA"
+                  Property="ENROLLCMD"
+                  BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Return="check"
@@ -320,7 +341,8 @@
          it itself after enrolling, and a hand-typed install with no token
          deliberately leaves it stopped for an operator to enroll first. -->
     <CustomAction Id="StartEnrolledService"
-                  BinaryRef="WixCA"
+                  Property="STARTSERVICECMD"
+                  BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
                   Return="ignore"
@@ -362,8 +384,14 @@
          component: a technician who wants to test a candidate folder before
          committing to it can run it by hand and read the sentence on stderr. -->
 
-    <UIRef Id="WixUI_InstallDir" />
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <!-- v5 includes a UI set with the WixUI element, which also sets
+         WIXUI_INSTALLDIR from InstallDirectory. The v3 pairing of UIRef plus a
+         WIXUI_INSTALLDIR property does not link: WixUI_InstallDir is a
+         protected symbol inside the extension, so referencing it as a UIRef
+         target from a package fails with "inaccessible due to its protection
+         level". UIRef still exists, but only for sequence references within a
+         fragment, which is how the extension refers to itself. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
 
     <!-- ================= protected folder prompt ================= -->
     <!--
@@ -420,12 +448,16 @@
         </Control>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
                  Default="yes" Text="Next">
-          <Publish Event="NewDialog" Value="CostFinalize" />
+          <!-- VerifyReadyDlg is what WixUI_InstallDir shows after InstallDirDlg.
+               An earlier draft sent this to CostFinalize, which is not in that
+               set at all; the sequence is Welcome, LicenseAgreement,
+               InstallDir, VerifyReady, DiskCost. -->
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
         </Control>
       </Dialog>
 
       <!-- Take over the Next button on the install-location page so the folder
-           page follows it. CostFinalize is where WixUI_InstallDir would have
+           page follows it. VerifyReadyDlg is where WixUI_InstallDir would have
            gone next, so nothing downstream of the sequence is lost. -->
       <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="BackupPathDlg" />
     </UI>
