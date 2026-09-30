@@ -242,6 +242,48 @@ jobs:
             exit 1
           fi
 
+      # The verbose install log can only say what ran, not what the package
+      # actually contains. Dumping the compiled tables is how you tell a missing
+      # row from a row that was written and then ignored.
+      - name: inspect the compiled service tables
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force -Path msilogs | Out-Null
+          $out = 'msilogs/tables.txt'
+          $msi = New-Object -ComObject WindowsInstaller.Installer
+          $path = (Resolve-Path 'SoftafriqueBackupAgent.msi').Path
+          function Invoke-MsiQuery {
+            param([string]$sql)
+            try {
+              $db = $msi.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$msi,@($path,0))
+              $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
+              $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
+              while ($true) {
+                $rec = $view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+                if ($null -eq $rec) { break }
+                $n = $rec.GetType().InvokeMember('FieldCount','GetProperty',$null,$rec,$null)
+                $vals = for ($i = 1; $i -le $n; $i++) {
+                  $rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,$i)
+                }
+                "    $($vals -join ' | ')"
+              }
+            } catch {
+              "    <no such table: $($_.Exception.Message.Split([char]10)[0])>"
+            }
+          }
+          foreach ($q in @(
+            'SELECT Name FROM `_Tables` ORDER BY Name'
+            'SELECT * FROM `Service`'
+            'SELECT Service,Name,Component_ FROM `ServiceConfig`'
+            'SELECT Component,ComponentId,Directory_ FROM `Component`'
+            'SELECT * FROM `InstallExecuteSequence` WHERE `Action` = ''InstallServices'''
+            'SELECT * FROM `InstallExecuteSequence` WHERE `Action` = ''StartServices'''
+          )) {
+            "QUERY: $q" | Tee-Object -FilePath $out -Append
+            Invoke-MsiQuery $q | Tee-Object -FilePath $out -Append
+          }
+          Get-Content $out
+
       - name: smoke test the MSI layout
         run: |
           # An unsigned MSI still lays out and rolls back, which is what breaks
@@ -273,8 +315,8 @@ jobs:
         if: always()
         run: |
           New-Item -ItemType Directory -Force -Path msilogs | Out-Null
-          Get-ChildItem -Filter '*.log' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^(msi|repair|refused)\.log$' } |
+          Get-ChildItem -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in '.log', '.txt' } |
             ForEach-Object { Copy-Item $_.FullName "msilogs/$($_.Name)" }
           Get-ChildItem msilogs | Select-Object Name, Length | Format-Table | Out-String | Write-Host
 
@@ -370,7 +412,9 @@ jobs:
           Write-Host "ok  a network share is refused, and the log says why"
 
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: msi
           path: SoftafriqueBackupAgent.msi
+          if-no-files-found: warn
           retention-days: 90
