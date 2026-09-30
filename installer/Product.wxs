@@ -266,26 +266,25 @@
     <SetProperty Id="ALLOWUNCSWITCH" Value="-allow-unc "
                  Before="ValidateBackupFolder" Sequence="execute" Condition="ALLOWUNC" />
 
-    <Property Id="VALIDATEFOLDERCMD" Secure="yes" />
-    <Property Id="WRITECONFIGCMD" Secure="yes" />
-    <Property Id="ENROLLCMD" Secure="yes" />
-    <Property Id="STARTSERVICECMD" Secure="yes" />
-
-    <!-- The template is rendered by the agent rather than by the MSI, because
-         WiX 5 has no text templating. It runs before the folder check so that
-         a machine that fails to install also fails to install its config, and
-         it runs on a TESTINSTALL too so the smoke test exercises the same
-         path a real install takes. -->
-    <SetProperty Id="WRITECONFIGCMD"
+    <!-- Each SetProperty is named after the custom action it feeds, not after a
+         property of its own. That is forced: CustomAction takes at most one of
+         BinaryRef, Directory, FileRef, Property or Script, and these actions
+         need BinaryRef for the DLL entry, so they cannot also name a Property.
+         A deferred action cannot read properties, so MSI hands it the value of
+         the property whose name matches the action's own Id as
+         CustomActionData, and WixQuietExec reads CustomActionData in
+         preference to WixQuietExec64CmdLine. Naming them anything else, as an
+         earlier draft did, silently handed the action an empty command line. -->
+    <SetProperty Id="WriteConfig"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]&quot;"
                  Before="WriteConfig" Sequence="execute" />
-    <SetProperty Id="VALIDATEFOLDERCMD"
+    <SetProperty Id="ValidateBackupFolder"
                  Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; [ALLOWUNCSWITCH]&quot;[BACKUPPATH]&quot;"
                  Before="ValidateBackupFolder" Sequence="execute" />
-    <SetProperty Id="ENROLLCMD"
+    <SetProperty Id="EnrollDevice"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; enroll -token-file &quot;[ENROLLTOKENFILE]&quot; -config &quot;[DATAFOLDER]config.yaml&quot;"
                  Before="EnrollDevice" Sequence="execute" />
-    <SetProperty Id="STARTSERVICECMD" Value="&quot;[SystemFolder]sc.exe&quot; start &quot;SoftafriqueBackupAgent&quot;"
+    <SetProperty Id="StartEnrolledService" Value="&quot;[SystemFolder]sc.exe&quot; start &quot;SoftafriqueBackupAgent&quot;"
                  Before="StartEnrolledService" Sequence="execute" />
 
     <!-- ================= custom actions ================= -->
@@ -307,14 +306,14 @@
         * The CA binary is Wix4UtilCA_X64, not WixCA. WiX renamed it; the
           converter says so explicitly when it rewrites a v3 package. There is
           no WixCA in v5, which is why the linker could not resolve it.
-        * Each action names its command property. A deferred action cannot read
-          properties, so MSI hands it the value of the property named in
-          Property= as CustomActionData, and WixQuietExec reads CustomActionData
-          in preference to WixQuietExec64CmdLine. Without Property= the command
-          line would arrive empty and the action would succeed at nothing.
+        * No Property= attribute, because a CustomAction may carry only one of
+          BinaryRef, Directory, FileRef, Property or Script, and these need
+          BinaryRef. The command therefore travels as CustomActionData, taken
+          from the property named after the action; see the SetProperty block
+          above. An action given neither arrives with an empty command line and
+          succeeds at nothing, which is the quietest possible failure.
     -->
     <CustomAction Id="WriteConfig"
-                  Property="WRITECONFIGCMD"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
@@ -322,7 +321,6 @@
                   Impersonate="no" />
 
     <CustomAction Id="ValidateBackupFolder"
-                  Property="VALIDATEFOLDERCMD"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
@@ -330,7 +328,6 @@
                   Impersonate="no" />
 
     <CustomAction Id="EnrollDevice"
-                  Property="ENROLLCMD"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
@@ -341,7 +338,6 @@
          it itself after enrolling, and a hand-typed install with no token
          deliberately leaves it stopped for an operator to enroll first. -->
     <CustomAction Id="StartEnrolledService"
-                  Property="STARTSERVICECMD"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
