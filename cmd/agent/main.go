@@ -83,6 +83,15 @@ func run(args []string) int {
 	case "help", "--help", "-h":
 		usage(os.Stdout)
 		return exitOK
+	case "render-config":
+		// Dispatched here rather than with the rest, because it runs during
+		// install, before config.yaml exists. Loading the environment first
+		// would fail on the very file this command is there to produce.
+		if err := cmdRenderConfig(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return exitError
+		}
+		return exitOK
 	}
 
 	var err error
@@ -370,6 +379,49 @@ func resolveToken(flagToken, tokenFile string) (value string, fromFlag bool, err
 		return v, true, nil
 	}
 	return "", false, fmt.Errorf("no enrollment token: set %s, or pass -token-file, or -token", EnrollTokenEnv)
+}
+
+// cmdRenderConfig writes config.yaml from the installer's template, filling in
+// the paths that are only known at install time.
+//
+// The MSI used to do this with the Util extension's ConfigurableTextFile, which
+// WiX 4 removed and WiX 5 never replaced, so the substitution now happens here.
+// Keeping it in the agent means the result is parsed and validated before it is
+// installed, rather than by the service on its first boot.
+func cmdRenderConfig(args []string) error {
+	fs := flag.NewFlagSet("render-config", flag.ContinueOnError)
+	template := fs.String("template", "", "config template to read (required)")
+	out := fs.String("out", "", "path to write (required)")
+	backupPath := fs.String("backup-path", "", "folder to protect (required)")
+	dataDir := fs.String("data-dir", "", "agent state directory (default the standard one)")
+	statusFile := fs.String("status-file", "", "status.json path (default inside data-dir)")
+	logFile := fs.String("log-file", "", "agent log path (default inside data-dir)")
+	force := fs.Bool("force", false, "overwrite an existing file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *template == "" || *out == "" {
+		fs.Usage()
+		return errors.New("render-config needs -template and -out")
+	}
+
+	wrote, err := config.RenderToFile(*template, *out, config.RenderOptions{
+		BackupPath: *backupPath,
+		DataDir:    *dataDir,
+		StatusFile: *statusFile,
+		LogFile:    *logFile,
+	}, *force)
+	if err != nil {
+		return err
+	}
+	if !wrote {
+		// This is the NeverOverwrite case: a repair or an upgrade must not
+		// discard a config a technician edited on site.
+		fmt.Printf("kept existing %s\n", *out)
+		return nil
+	}
+	fmt.Printf("wrote %s\n", *out)
+	return nil
 }
 
 func cmdUnenroll(args []string) error {
@@ -789,6 +841,7 @@ Operations:
   snapshots   Show the latest snapshot.
   status      Print status.json, or -short for one monitoring line.
   restore     Restore a snapshot into a folder.
+  render-config  Write config.yaml from the installer template (used by the MSI).
   version     Print the version.
 
 Common flags:

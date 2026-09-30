@@ -1,7 +1,6 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -57,11 +56,12 @@ func TestTheOptInIsOffInEveryShippedConfig(t *testing.T) {
 	}
 }
 
-// substitute fills the placeholders the way the MSI's ConfigurableTextFile does.
+// substitute fills the placeholders with the real renderer, so this file tests
+// the code the installer actually runs rather than a copy of it.
 func substitute(body []byte) []byte {
-	out := string(body)
-	for name, value := range templateValues {
-		out = strings.ReplaceAll(out, name, value)
+	out, err := Render(body, RenderOptions{BackupPath: templateValues["[BACKUPPATH]"]})
+	if err != nil {
+		panic("substituting the template failed: " + err.Error())
 	}
-	return []byte(out)
+	return out
 }

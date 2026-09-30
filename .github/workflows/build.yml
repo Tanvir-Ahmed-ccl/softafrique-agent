@@ -298,6 +298,22 @@ jobs:
           }
           Write-Host "ok  config.yaml was written with its placeholders substituted"
 
+          # The opt-in and an on-site edit both have to survive a repair. This
+          # is the guarantee the old ConfigurableTextFile NeverOverwrite="yes"
+          # gave for free, and it moved into render-config when WiX 4 deleted
+          # that element, so it is now worth asserting rather than assuming.
+          Add-Content $cfg "`n# edited on site by a technician"
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'repair.log',
+            'BACKUPPATH=C:\SoftafriqueBackup', 'REINSTALLMODE=vomus'
+          )
+          if ($p.ExitCode -ne 0) { throw "repair exited $($p.ExitCode)" }
+          $after = Get-Content $cfg -Raw
+          if (-not $after.Contains('edited on site by a technician')) {
+            throw "a repair discarded the on-site config edit; render-config must not overwrite"
+          }
+          Write-Host "ok  a repair left the existing config.yaml alone"
+
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
             '/x', 'SoftafriqueBackupAgent.msi', '/qn'
           )

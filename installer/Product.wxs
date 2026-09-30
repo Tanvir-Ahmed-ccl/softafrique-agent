@@ -93,7 +93,7 @@
       <ComponentRef Id="AgentService" />
       <ComponentRef Id="DataFolderAcl" />
       <ComponentRef Id="DataFolderRegistry" />
-      <ComponentRef Id="ConfigFile" />
+      <ComponentRef Id="ConfigTemplate" />
     </Feature>
 
     <!-- ================= service ================= -->
@@ -177,31 +177,39 @@
 
     <!-- ================= configuration ================= -->
     <!--
-      NeverOverwrite: a repair or an upgrade must not reset a config that a
-      technician edited on site, in particular a BACKUPPATH that was corrected
-      from what the RMM asked for. The template's placeholders are filled from
-      the properties below, so the installed file is always internally
-      consistent with where the files actually are.
+      The template ships verbatim and is rendered into config.yaml by the
+      agent's render-config command, called from the execute sequence below.
 
-      The one thing this cannot do is change allow_unc on a later install,
-      because NeverOverwrite skips the file entirely. That is the lesser evil: an
-      upgrade must not re-grant an opt-in the operator has since withdrawn by
-      hand, and a repair must not undo an operator who has tightened the config.
+      It used to be rendered by the Util extension's ConfigurableTextFile, with
+      NeverOverwrite="yes" to protect a config a technician had edited on site.
+      WiX 4 deleted ConfigurableTextFile and WiX 5 has no replacement;
+      util:XmlConfig rewrites XML, so it cannot fill a YAML template. Doing it in
+      the agent keeps the install-time guarantees that were asked for here:
 
-      The opt-in is therefore not written from here at all. install.ps1 -AllowUNC
-      passes ALLOWUNC=1 on the command line so this check agrees, and then edits
-      allow_unc in config.yaml after the install, which both survives
-      NeverOverwrite and puts the value where a person can read and change it.
+        * the result is parsed and validated before it is installed, rather than
+          by the service on its first boot, so a bad substitution fails the
+          install instead of leaving a device that looks deployed and protects
+          nothing;
+        * an existing config.yaml is left alone, which is what NeverOverwrite
+          did, so neither a repair nor an upgrade discards on-site edits and
+          re-grants an opt-in an operator has withdrawn;
+        * the UNC opt-in is still not written from here at all, for the reason
+          given above.
+
+      BACKUPPATH is the only value that genuinely varies per install. The three
+      state paths are in the template because an operator who edits config.yaml
+      should be able to see them, and they match what config.Default() derives
+      from data_dir anyway; render-config refuses a config where the status file
+      or the log sits outside data_dir.
+
+      install.ps1 -AllowUNC passes ALLOWUNC=1 on the command line so the check
+      below agrees, and then edits allow_unc in config.yaml after the install.
     -->
-    <Component Id="ConfigFile" Guid="6D9B7FD5-4A82-4EA6-9FB2-7B5C4DAF0C66" Directory="DATAFOLDER">
-      <File Id="ConfigFileName"
-            Name="config.yaml"
+    <Component Id="ConfigTemplate" Guid="6D9B7FD5-4A82-4EA6-9FB2-7B5C4DAF0C66" Directory="DATAFOLDER">
+      <File Id="ConfigTemplateFile"
+            Name="config.yaml.template"
             Source="!(bindpath.res)\config.yaml.template"
-            KeyPath="yes">
-        <util:ConfigurableTextFile Encoding="UTF-8"
-                                   NeverOverwrite="yes"
-                                   Configuration="DATADIR=[DATAFOLDER];STATUSFILE=[STATUSFILE];LOGFILE=[LOGFILE];BACKUPPATH=[BACKUPPATH]" />
-      </File>
+            KeyPath="yes" />
     </Component>
 
     <!-- ================= properties ================= -->
@@ -213,19 +221,12 @@
          validatepath.exe. -->
     <Property Id="BACKUPPATH" Value="C:\SoftafriqueBackup" />
 
-    <!-- Set from the execute sequence rather than through a Value attribute.
-         A Property/@Value is a string literal, not a formatted field, so
-         Value="[DATAFOLDER]status.json" would put the brackets in the file on
-         disk and the agent would create "[DATAFOLDER]status.json" relative to
-         its working directory. WiX says as much (WIX1077). SetProperty does
-         format, and CostFinalize is the last stop before the config file is
-         written, so this has to sit there and no later. -->
-    <Property Id="STATUSFILE" Secure="yes" />
-    <Property Id="LOGFILE" Secure="yes" />
-    <SetProperty Id="STATUSFILE" Value="[DATAFOLDER]status.json"
-                 Before="CostFinalize" Sequence="execute" />
-    <SetProperty Id="LOGFILE" Value="[DATAFOLDER]agent.log"
-                 Before="CostFinalize" Sequence="execute" />
+    <!-- STATUSFILE and LOGFILE are not set here. They used to be
+         Property/@Value="[DATAFOLDER]status.json", which is a string literal,
+         so the agent was handed a path called "[DATAFOLDER]status.json"; WiX
+         warns about it (WIX1077) and the install did not care. render-config
+         now derives both from data_dir with the same Default() the agent uses,
+         so there is no way for the two to disagree. -->
 
     <!-- The path to a one-time enrollment token written by the RMM. Only the
          path travels through the MSI; the token itself is read and deleted by
@@ -265,9 +266,18 @@
                  Before="ValidateBackupFolder" Sequence="execute" Condition="ALLOWUNC" />
 
     <Property Id="VALIDATEFOLDERCMD" Secure="yes" />
+    <Property Id="WRITECONFIGCMD" Secure="yes" />
     <Property Id="ENROLLCMD" Secure="yes" />
     <Property Id="STARTSERVICECMD" Secure="yes" />
 
+    <!-- The template is rendered by the agent rather than by the MSI, because
+         WiX 5 has no text templating. It runs before the folder check so that
+         a machine that fails to install also fails to install its config, and
+         it runs on a TESTINSTALL too so the smoke test exercises the same
+         path a real install takes. -->
+    <SetProperty Id="WRITECONFIGCMD"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]&quot;"
+                 Before="WriteConfig" Sequence="execute" />
     <SetProperty Id="VALIDATEFOLDERCMD"
                  Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; [ALLOWUNCSWITCH]&quot;[BACKUPPATH]&quot;"
                  Before="ValidateBackupFolder" Sequence="execute" />
@@ -285,6 +295,13 @@
       enrollment failed would leave a machine that looks deployed and protects
       nothing.
     -->
+    <CustomAction Id="WriteConfig"
+                  BinaryRef="WixCA"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
     <CustomAction Id="ValidateBackupFolder"
                   BinaryRef="WixCA"
                   DllEntry="WixQuietExec64"
@@ -310,7 +327,12 @@
                   Impersonate="no" />
 
     <InstallExecuteSequence>
-      <Custom Action="ValidateBackupFolder" After="InstallFiles"
+      <!-- Writes config.yaml. On an upgrade or a repair the file already exists
+           and render-config keeps it, which is the NeverOverwrite behaviour the
+           old ConfigurableTextFile gave for free. -->
+      <Custom Action="WriteConfig" After="InstallFiles" Condition="NOT REMOVE" />
+
+      <Custom Action="ValidateBackupFolder" After="WriteConfig"
               Condition="NOT TESTINSTALL AND NOT REMOVE" />
 
       <!-- Enrollment happens after the service exists and the data directory is
