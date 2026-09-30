@@ -120,9 +120,26 @@ jobs:
           # fail every hourly backup because the machine account was never granted
           # access, with nothing in a backup report to say where.
           Check 'network share refused' '\\fileserver\CustomerData' 7
-          if (Test-Path '\\fileserver\CustomerData') {
-            throw "the share was somehow reached; the refusal is meant to happen before any access"
+
+          # The refusal has to come from the policy, not from a failed lookup, and
+          # those are told apart by the message. A share that does not exist here
+          # still produced an answer naming the share, and that is only possible if
+          # nothing asked the network first -- a lookup would have said the host
+          # could not be found instead.
+          #
+          # Test-Path is deliberately not used to ask whether the share is
+          # reachable. It is the network access this is meant to prove does not
+          # happen, and GitHub Actions runs this step with
+          # $ErrorActionPreference='Stop', so Test-Path on an unresolvable share
+          # raises a terminating error and fails the step over its own probe.
+          $shareOut = (& $exe '\\fileserver\CustomerData' 2>&1) -join "`n"
+          if ($LASTEXITCODE -ne 7) {
+            throw "a share should still be refused on the second call, got $LASTEXITCODE"
           }
+          if ($shareOut -notmatch 'network share') {
+            throw "the refusal did not name the share, so it was not the policy that refused it:`n$shareOut"
+          }
+          Write-Host 'ok  a share is refused by the policy, which never resolves it'
 
   build:
     name: build Windows binaries
