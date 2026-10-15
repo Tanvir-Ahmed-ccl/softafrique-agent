@@ -308,6 +308,26 @@ jobs:
           if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "agent not removed" }
           Write-Host "MSI installs and uninstalls cleanly"
 
+          # The RMM uninstall script has to find the product code on the machine,
+          # because it cannot be written down anywhere: Product.wxs declares no
+          # ProductCode, so WiX regenerates it every build, and the UpgradeCode
+          # the script used to hardcode can never match -- msiexec returns 1605,
+          # 1605 counts as success, and the uninstall "passes" with the service
+          # and the files still in place. The exit code alone therefore proves
+          # nothing; the service and the program files are what prove it.
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', 'SoftafriqueBackupAgent.msi', '/qn', 'TESTINSTALL=1'
+          )
+          if ($p.ExitCode -ne 0) { throw "reinstall exited $($p.ExitCode)" }
+          & ./scripts/rmm/uninstall.ps1
+          if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 exited $LASTEXITCODE" }
+          if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "uninstall.ps1 left the program files behind" }
+          if (Get-Service -Name SoftafriqueBackupAgent -ErrorAction SilentlyContinue) { throw "uninstall.ps1 left the service registered" }
+          # The default has to leave the sealed credentials behind: without them
+          # the escrowed key is the only way back to the customer's history.
+          if (-not (Test-Path "$env:ProgramData\SoftafriqueBackupAgent\config.yaml")) { throw "uninstall.ps1 removed the data directory; an uninstall must not touch the sealed credentials" }
+          Write-Host "ok  uninstall.ps1 looks up the product code and removes the agent"
+
       # A failing install is only diagnosable from its own log, and the log is
       # written into the workspace. Collected whatever the outcome, because the
       # step that fails is not always the one that knows why.
