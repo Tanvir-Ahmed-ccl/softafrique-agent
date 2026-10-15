@@ -13,10 +13,12 @@
 # reports each backup's outcome.
 server: "https://backup.softafrique.net/api/v1"
 
-# Restic repository URL. This is only consulted on a device that has NOT been
-# enrolled: for local development and for `agent reimport` after a reimage. An
-# enrolled device uses the repository the gateway returned, so a stale value
-# here cannot point a paying customer at the wrong place.
+# Restic repository URL. This line is kept in the shipped file deliberately,
+# not left over from an earlier design: it is the repository `agent reimport`
+# reads after a reimage, and the only place one is configured for a device that
+# has NOT been enrolled (local development uses it too). On an enrolled device
+# the repository the gateway returned at enrollment always wins, so a stale
+# value here cannot point a paying customer at the wrong place.
 #
 # The server serves repositories at the root, one per device:
 #   rest:https://backup.softafrique.net/{device_id}
