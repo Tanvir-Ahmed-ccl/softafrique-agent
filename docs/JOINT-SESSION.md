@@ -185,9 +185,11 @@ The parts that only mean anything as LocalSystem on a domain-joined machine.
    icacls "$env:ProgramData\SoftafriqueBackupAgent"
    ```
 
-   Must be SYSTEM and Administrators full control, `Users` read, and **inheritance
-   disabled** so a later widening of `%ProgramData%` cannot silently expose
-   `credentials.dat`. Verify the inherited ACE is genuinely gone.
+   Must be SYSTEM and Administrators full control, and **inheritance disabled** so
+   a later widening of `%ProgramData%` cannot silently expose `credentials.dat`.
+   There must be **no `Users` read ACE**: an earlier package granted one and it did
+   not work, because a non-inheritable directory ACE does not reach the files
+   inside. Verify both the inherited ACE and any `Users` entry are genuinely gone.
 
 3. Confirm the key is not anywhere it should not be, after a real run:
 
@@ -196,8 +198,8 @@ The parts that only mean anything as LocalSystem on a domain-joined machine.
    Get-Content "$env:ProgramData\SoftafriqueBackupAgent\agent.log" -Tail 100 | Select-String 'password|key'
    ```
 
-   `agent.log` must have the token, the key and the repository password in it. A
-   match in any of the three is a stop-the-line finding.
+   `agent.log` must contain **none** of the token, the key or the repository
+   password. A match in any of the three is a stop-the-line finding.
 
 4. The 0.1.0 plaintext `password_file` is deleted when it lives inside the data
    directory, and **left alone** when an operator put it somewhere else. Test both.
