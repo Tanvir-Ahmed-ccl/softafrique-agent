@@ -173,18 +173,18 @@ data-dir: "C:\\ProgramData\\Elsewhere"
 	}
 }
 
-// TestRepoWithEmbeddedCredentialIsRejected is the migration guard for the
+// TestRepoWithEmbeddedCredentialIsStripped is the migration for the
 // 0.1.0 config format, where the device password had to be typed into the URL.
-func TestRepoWithEmbeddedCredentialIsRejected(t *testing.T) {
-	_, err := Load(writeConfig(t, `
+func TestRepoWithEmbeddedCredentialIsStripped(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
 repo: "rest:https://9f2c4a7b1d8e@backup.softafrique.net/repos/mohsin"
 password_file: "pw"
 `), nil)
-	if err == nil {
-		t.Fatal("expected a credential-bearing repo URL to be rejected")
+	if err != nil {
+		t.Fatalf("expected credentials to be stripped on load, got %v", err)
 	}
-	if !strings.Contains(err.Error(), "must not embed credentials") {
-		t.Errorf("error should explain the problem, got %v", err)
+	if strings.Contains(cfg.Repo, "@") {
+		t.Fatalf("repo still contains credentials: %s", cfg.Repo)
 	}
 }
 

@@ -154,6 +154,14 @@ func (r *Restic) newCmd(ctx context.Context, args ...string) *exec.Cmd {
 	if r.opts.PasswordFile == "" && r.opts.Password != "" {
 		cmd.Env = append(cmd.Env, "RESTIC_PASSWORD="+r.opts.Password)
 	}
+	if r.opts.Host != "" {
+		cmd.Env = append(cmd.Env, "RESTIC_REST_USERNAME="+r.opts.Host)
+	}
+	if r.opts.PasswordFile == "" && r.opts.Password != "" {
+		cmd.Env = append(cmd.Env, "RESTIC_REST_PASSWORD="+r.opts.Password)
+	} else if r.opts.Password != "" {
+		cmd.Env = append(cmd.Env, "RESTIC_REST_PASSWORD="+r.opts.Password)
+	}
 	// A predictable cache location keeps restic's state out of the service
 	// account's roaming profile, and keeps two invocations from fighting over
 	// the default %LOCALAPPDATA% path when one runs as SYSTEM and one as an

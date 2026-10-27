@@ -455,11 +455,10 @@ func (c *Config) Validate() error {
 		return errors.New("config: data_dir must not be empty")
 	}
 	// A 0.1.0 config carries the device password inside the repository URL,
-	// because that was the only place restic would take it from by hand. Catch
-	// it at load time rather than putting it back in a command line.
+	// because that was the only place restic would take it from by hand. Strip
+	// it so upgraded devices have a route out (enroll/migrate can proceed).
 	if strings.Contains(c.Repo, "@") {
-		return errors.New("config: repo must not embed credentials; the device password is delivered in restic's " +
-			"environment instead, and the gateway returns a credential-free repository at enrollment")
+		c.Repo = secret.SanitizeURL(c.Repo)
 	}
 	return nil
 }
