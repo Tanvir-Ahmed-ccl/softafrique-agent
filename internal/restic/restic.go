@@ -102,6 +102,10 @@ type Options struct {
 	// for manual development and break-glass recovery; production devices are
 	// enrolled and use Password.
 	PasswordFile string
+	// RESTUser is the HTTP basic username for the REST backend (device id).
+	RESTUser string
+	// RESTPassword is the HTTP basic password for the REST backend (device password).
+	RESTPassword string
 	// Logger receives restic's own output. It may be nil.
 	Logger *slog.Logger
 }
@@ -154,10 +158,17 @@ func (r *Restic) newCmd(ctx context.Context, args ...string) *exec.Cmd {
 	if r.opts.PasswordFile == "" && r.opts.Password != "" {
 		cmd.Env = append(cmd.Env, "RESTIC_PASSWORD="+r.opts.Password)
 	}
-	if r.opts.Host != "" {
-		cmd.Env = append(cmd.Env, "RESTIC_REST_USERNAME="+r.opts.Host)
+	restUser := r.opts.RESTUser
+	if restUser == "" {
+		restUser = r.opts.Host
 	}
-	if r.opts.PasswordFile == "" && r.opts.Password != "" {
+	if restUser != "" {
+		cmd.Env = append(cmd.Env, "RESTIC_REST_USERNAME="+restUser)
+	}
+	restPass := r.opts.RESTPassword
+	if restPass != "" {
+		cmd.Env = append(cmd.Env, "RESTIC_REST_PASSWORD="+restPass)
+	} else if r.opts.PasswordFile == "" && r.opts.Password != "" {
 		cmd.Env = append(cmd.Env, "RESTIC_REST_PASSWORD="+r.opts.Password)
 	} else if r.opts.Password != "" {
 		cmd.Env = append(cmd.Env, "RESTIC_REST_PASSWORD="+r.opts.Password)

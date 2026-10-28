@@ -147,11 +147,13 @@ func (a *Agent) load() error {
 	}
 
 	opts := restic.Options{
-		Binary:     a.cfg.ResticPath,
-		Repository: creds.Repository,
-		Host:       creds.DeviceID,
-		Password:   creds.ResticPassword(),
-		Logger:     a.log,
+		Binary:       a.cfg.ResticPath,
+		Repository:   creds.Repository,
+		Host:         creds.DeviceID,
+		Password:     creds.ResticPassword(),
+		RESTUser:     creds.BasicAuthUser(),
+		RESTPassword: creds.DevicePassword,
+		Logger:       a.log,
 	}
 	if a.cfg.PasswordFile != "" && a.cfg.DeviceID != "" {
 		// Only a hand-configured, unenrolled-style setup uses a password file.

@@ -17,10 +17,12 @@ import (
 // yet, so enrollment can test a repository before committing to it.
 func (a *Agent) probeRestic(creds *secret.Credentials) *restic.Restic {
 	return restic.New(restic.Options{
-		Binary:     a.cfg.ResticPath,
-		Repository: creds.Repository,
-		Host:       creds.DeviceID,
-		Password:   creds.ResticPassword(),
+		Binary:       a.cfg.ResticPath,
+		Repository:   creds.Repository,
+		Host:         creds.DeviceID,
+		Password:     creds.ResticPassword(),
+		RESTUser:     creds.BasicAuthUser(),
+		RESTPassword: creds.DevicePassword,
 		// Enrollment never creates a repository and neither does anything else.
 		// There is no option to turn init on; see restic.EnsureRepo.
 		Logger: a.log,
