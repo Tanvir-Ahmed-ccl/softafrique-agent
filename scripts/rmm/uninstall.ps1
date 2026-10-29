@@ -3,20 +3,22 @@
     Removes the Softafrique Backup Agent from this machine.
 
 .DESCRIPTION
-    Removes the service and the program files, and by default leaves the sealed
-    credentials and the repository alone.
+    Removes the service, the program files and the sealed credentials, and
+    leaves config.yaml, status.json and the log in place for diagnostics.
 
-    That default is deliberate. Uninstalling an agent does not unsuspend a
-    device at the gateway, does not delete a single snapshot, and does not
-    release the encryption key. A technician replacing a machine should be able
-    to uninstall, reimage, reinstall and enroll, and the customer's backup
-    history is still on the server either way. Use -PurgeCredentials only when
-    the device is genuinely finished with.
+    Deleting credentials.dat is the default because an uninstalled agent must
+    not leave a usable repository key on a decommissioned or reimaged machine.
+    The repository and every snapshot stay on the server; a restore now needs
+    the escrowed key from the dashboard. Uninstalling does not suspend the
+    device at the gateway, so suspend it separately if the machine is finished.
+
+    The MSI performs the same cleanup on a standalone uninstall. This script
+    repeats it only as a fallback for an interrupted or older package.
 
 .PARAMETER PurgeCredentials
-    Also delete credentials.dat, which deletes the encryption key from this
-    machine. After that a restore from this device is impossible without the
-    escrowed key from the dashboard, so this is not reversible from here.
+    Also delete the whole data directory, including config.yaml, status.json,
+    the log and restic's cache. Without this switch those diagnostic files are
+    kept. The encryption key is deleted either way.
 
 .PARAMETER KeepStatus
     Keep status.json. Useful when capturing it for a ticket before removal.
@@ -141,23 +143,36 @@ if ($MsiProductCode) {
     Write-Step 'no MSI package registered; nothing for msiexec to remove'
 }
 
-# The MSI removes its own files, but the data directory and the sealed
-# credentials are per-machine state it deliberately leaves behind.
+# The MSI removes its own files. The data directory survives, but the sealed
+# credentials must not: the MSI's own uninstall action already deletes them, and
+# this is the fallback for an interrupted uninstall or an older package.
+$credentials = Join-Path $DataDir 'credentials.dat'
+if (Test-Path $credentials) {
+    Remove-Item $credentials -Force -ErrorAction SilentlyContinue
+    if (Test-Path $credentials) {
+        Write-Output "[uninstall] FAILED: could not delete $credentials. Delete it by hand."
+        exit 1
+    }
+    Write-Step 'sealed credentials deleted from this machine; a restore now needs the escrowed key from the dashboard'
+} else {
+    Write-Step 'no sealed credentials to delete'
+}
+
 if ($PurgeCredentials) {
     if (Test-Path $DataDir) {
-        Write-Step "deleting $DataDir, including the sealed encryption key"
+        Write-Step "deleting $DataDir, including config, status and the restic cache"
         Remove-Item $DataDir -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path $DataDir) {
             Write-Output "[uninstall] FAILED: could not delete $DataDir. Delete it by hand."
             exit 1
         }
-        Write-Step 'encryption key deleted from this machine. A restore now needs the escrowed key from the dashboard.'
+        Write-Step 'data directory removed'
     } else {
         Write-Step 'no data directory to purge'
     }
 } else {
     if (Test-Path $DataDir) {
-        Write-Step "kept $DataDir (credentials and status). Snapshots on the server are untouched either way."
+        Write-Step "kept $DataDir without credentials, for diagnostics. Snapshots on the server are untouched either way."
         Write-Step 'the device is still enrolled at the gateway; suspend it from the dashboard if it is decommissioned.'
     }
 }

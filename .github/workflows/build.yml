@@ -281,6 +281,7 @@ jobs:
             'SELECT * FROM `Wix4ServiceConfig`'
             'SELECT * FROM `Component`'
             'SELECT * FROM `FeatureComponents`'
+            'SELECT * FROM `MsiLockPermissionsEx`'
             'SELECT * FROM `InstallExecuteSequence`'
           )) {
             "QUERY: $q" | Tee-Object -FilePath $out -Append
@@ -305,12 +306,25 @@ jobs:
           start-sleep -Seconds 3
           if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe")) { throw "agent not installed" }
           if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\validatepath.exe")) { throw "validatepath not installed" }
+          $data = "$env:ProgramData\SoftafriqueBackupAgent"
+          # This is the check that the broken icacls CA never reached: the
+          # directory must not inherit BUILTIN\Users from %ProgramData%.
+          $acl = Get-Acl $data
+          if (-not $acl.AreAccessRulesProtected) { throw "data directory still inherits its parent ACL" }
+          $bad = $acl.Access | Where-Object {
+            $sid = $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+            $sid -in @('S-1-5-32-545', 'S-1-5-11', 'S-1-1-0')
+          }
+          if ($bad) { throw "data directory grants access to Users/Authenticated Users/Everyone: $($bad.IdentityReference -join ', ')" }
+          Set-Content -Path "$data\credentials.dat" -Value 'sentinel: uninstall must delete this'
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
-            '/x', 'SoftafriqueBackupAgent.msi', '/qn'
+            '/x', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'uninstall.log'
           )
           if ($p.ExitCode -ne 0) { throw "uninstall exited $($p.ExitCode)" }
           if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "agent not removed" }
-          Write-Host "MSI installs and uninstalls cleanly"
+          if (Test-Path "$data\credentials.dat") { throw "uninstall left the sealed credentials behind" }
+          if (-not (Test-Path "$data\config.yaml")) { throw "uninstall removed the diagnostic data directory" }
+          Write-Host "MSI installs and uninstalls cleanly, and removes the sealed credentials"
 
           # The RMM uninstall script has to find the product code on the machine,
           # because it cannot be written down anywhere: Product.wxs declares no
@@ -323,14 +337,17 @@ jobs:
             '/i', 'SoftafriqueBackupAgent.msi', '/qn', 'TESTINSTALL=1'
           )
           if ($p.ExitCode -ne 0) { throw "reinstall exited $($p.ExitCode)" }
+          $data = "$env:ProgramData\SoftafriqueBackupAgent"
+          Set-Content -Path "$data\credentials.dat" -Value 'sentinel: uninstall must delete this'
           & ./scripts/rmm/uninstall.ps1
           if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 exited $LASTEXITCODE" }
           if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "uninstall.ps1 left the program files behind" }
           if (Get-Service -Name SoftafriqueBackupAgent -ErrorAction SilentlyContinue) { throw "uninstall.ps1 left the service registered" }
-          # The default has to leave the sealed credentials behind: without them
-          # the escrowed key is the only way back to the customer's history.
-          if (-not (Test-Path "$env:ProgramData\SoftafriqueBackupAgent\config.yaml")) { throw "uninstall.ps1 removed the data directory; an uninstall must not touch the sealed credentials" }
-          Write-Host "ok  uninstall.ps1 looks up the product code and removes the agent"
+          # The sealed key must go, but config/status stay readable for the
+          # ticket and so an operator can prove what the machine last did.
+          if (Test-Path "$data\credentials.dat") { throw "uninstall.ps1 left the sealed credentials behind" }
+          if (-not (Test-Path "$data\config.yaml")) { throw "uninstall.ps1 removed the diagnostic data directory" }
+          Write-Host "ok  uninstall.ps1 looks up the product code, removes the agent and deletes the key"
 
       # A failing install is only diagnosable from its own log, and the log is
       # written into the workspace. Collected whatever the outcome, because the

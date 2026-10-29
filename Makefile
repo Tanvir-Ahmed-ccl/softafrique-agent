@@ -3,7 +3,7 @@
 # Development happens on macOS; the customer agent ships as a Windows exe. The
 # MSI can only be built on Windows with the WiX toolset on PATH.
 
-VERSION         ?= 0.2.21
+VERSION         ?= 0.2.22
 WIN_TARGET      ?= build/bin/SoftafriqueBackupAgent.exe
 VALIDATE_TARGET ?= build/bin/validatepath.exe
 MAC_TARGET      ?= build/bin/agent

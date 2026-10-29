@@ -436,15 +436,17 @@ func cmdRenderConfig(args []string) error {
 }
 
 func cmdUnenroll(args []string) error {
-	var assumeYes bool
+	var assumeYes, force bool
 	env, err := openEnv(args, true, func(fs *flag.FlagSet) error {
 		fs.BoolVar(&assumeYes, "yes", false, "do not ask for confirmation")
+		fs.BoolVar(&force, "force", false, "delete an unreadable blob without validating it")
 		return nil
 	})
 	if err != nil {
 		return err
 	}
-	if !env.cfg.SecretStore().Exists() {
+	store := env.cfg.SecretStore()
+	if !store.Exists() {
 		fmt.Println("this device has no stored credentials; nothing to do")
 		return nil
 	}
@@ -452,7 +454,13 @@ func cmdUnenroll(args []string) error {
 		return actionRequired("this deletes the encryption key from this machine, after which a restore from " +
 			"this device is impossible without the escrowed key. Re-run with -yes if that is intended")
 	}
-	if err := newAgent(env).Unenroll(); err != nil {
+	// The MSI uninstall uses -force: a corrupt or machine-bound blob still has
+	// to go, and the goal there is removal, not validating the credentials.
+	if force {
+		if err := store.Delete(); err != nil {
+			return fmt.Errorf("could not remove %s: %w", store.Path(), err)
+		}
+	} else if err := newAgent(env).Unenroll(); err != nil {
 		return err
 	}
 	fmt.Println("credentials deleted from this device; the repository and its snapshots are untouched")

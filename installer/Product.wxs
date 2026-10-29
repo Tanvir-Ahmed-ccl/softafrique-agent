@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.21" ?>
+<?define ProductVersion="0.2.22" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -168,19 +168,26 @@
     <Component Id="DataFolderAcl" Guid="5C8A6EC4-3F71-4D95-8EA1-6A4B3C9FBE55" Directory="DATAFOLDER">
       <!-- No KeyPath here, on purpose. A component with no keypath is a
            directory-keypath component, and Windows Installer only applies
-           LockPermissions to those, so this is what makes the explicit ACEs
+           permissions to those, so this is what makes the security descriptor
            below stick. Putting a keypath on the DataDir value instead, as an
            earlier draft did, silently left the credentials folder at inherited
            permissions.
 
-           PermissionEx writes explicit ACEs but cannot remove the inherited
-           Users ACE from %ProgramData%, which is why SecureDataFolder runs
-           icacls afterwards. The explicit grants stay here too: they are the
-           declarative record of who should have access, and they survive a
-           repair even if the custom action is skipped. -->
+           This is the MSI 5 PermissionEx element, which writes the
+           MsiLockPermissionsEx table, not util:PermissionEx. The difference
+           matters: util:PermissionEx adds ACEs but cannot break inheritance, so
+           it left BUILTIN\Users:(RX) inherited from %ProgramData% on
+           credentials.dat. The SDDL below is a protected DACL (P) containing
+           only SYSTEM and Administrators, so Windows Installer applies it
+           without inheriting the parent's Users ACE.
+
+           The previous icacls custom action was removed after a clean install
+           returned 1603: [SystemFolder] resolved to SysWOW64 and [DATAFOLDER]
+           ended in a backslash, producing malformed quoting. A declarative
+           security descriptor has neither failure mode and needs no CA. -->
       <CreateFolder>
-        <util:PermissionEx User="SYSTEM" GenericAll="yes" Inheritable="yes" />
-        <util:PermissionEx User="Administrators" GenericAll="yes" Inheritable="yes" />
+        <PermissionEx Id="DataFolderAclPerm"
+                      Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
       </CreateFolder>
     </Component>
 
@@ -290,18 +297,16 @@
          CustomActionData, and WixQuietExec reads CustomActionData in
          preference to WixQuietExec64CmdLine. Naming them anything else, as an
          earlier draft did, silently handed the action an empty command line. -->
-    <!--
-      PermissionEx adds explicit SYSTEM and Administrators ACEs, but it does not
-      stop the folder inheriting BUILTIN\Users:(RX) from %ProgramData%. On a
-      default Server install that left credentials.dat readable by every local
-      user, which is exactly the boundary that machine-scope DPAPI relies on.
-      icacls is the one supported tool here that can both break inheritance and
-      replace the trustee list; the SIDs are used instead of localised group
-      names so this works on a non-English Windows.
-    -->
-    <SetProperty Id="SecureDataFolder"
-                 Value="&quot;[SystemFolder]icacls.exe&quot; &quot;[DATAFOLDER]&quot; /inheritance:r /grant:r &quot;*S-1-5-18:(OI)(CI)F&quot; &quot;*S-1-5-32-544:(OI)(CI)F&quot; /remove:g &quot;*S-1-5-32-545&quot; &quot;*S-1-5-11&quot; &quot;*S-1-1-0&quot;"
-                 Before="SecureDataFolder" Sequence="execute" />
+    <!-- A standalone uninstall deletes the sealed repository key, because
+         leaving credentials.dat behind on a decommissioned or reimaged machine
+         is exactly the boundary the directory ACL exists to protect. The
+         condition excludes an uninstall run by RemoveExistingProducts during a
+         major upgrade: that removal must not eat the credentials the incoming
+         version is about to use, or every upgrade would silently unenrol the
+         device. This is Microsoft's documented UPGRADINGPRODUCTCODE pattern. -->
+    <SetProperty Id="RemoveCredentials"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; unenroll -yes -force -config &quot;[DATAFOLDER]config.yaml&quot;"
+                 Before="RemoveCredentials" Sequence="execute" />
 
     <SetProperty Id="WriteConfig"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]&quot;"
@@ -317,10 +322,17 @@
 
     <!-- ================= custom actions ================= -->
     <!--
-      All four are deferred, run in the SYSTEM context and use WixQuietExec, so
-      a non-zero exit fails the install instead of being logged and ignored.
-      That matters: an install that "succeeded" while enrollment failed would
-      leave a machine that looks deployed and protects nothing.
+      These five are deferred, run in the SYSTEM context and use WixQuietExec,
+      so a non-zero exit fails the operation instead of being logged and
+      ignored. That matters: an install that "succeeded" while enrollment
+      failed would leave a machine that looks deployed and protects nothing,
+      and an uninstall that quietly failed to delete the key would leave the
+      credentials this release exists to remove.
+
+      The data-directory ACL is deliberately not a custom action: the MSI 5
+      PermissionEx element above applies it through MsiLockPermissionsEx, so
+      there is no shell, no trailing-backslash quoting and no CA failure that
+      can abort a clean install.
 
       Deferred is not a stylistic choice. Enrollment seals the repository
       credentials with DPAPI, which is per-user, and the service runs as
@@ -341,7 +353,7 @@
           above. An action given neither arrives with an empty command line and
           succeeds at nothing, which is the quietest possible failure.
     -->
-    <CustomAction Id="SecureDataFolder"
+    <CustomAction Id="RemoveCredentials"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
@@ -380,14 +392,19 @@
                   Impersonate="no" />
 
     <InstallExecuteSequence>
-      <!-- Removes inherited access and leaves SYSTEM + Administrators on the
-           data directory before anything writes a credential into it. -->
-      <Custom Action="SecureDataFolder" After="InstallFiles" Condition="NOT REMOVE" />
+      <!-- Remove the key after the service has stopped and before RemoveFiles
+           deletes the executable this action runs. A major upgrade sets
+           UPGRADINGPRODUCTCODE on the outgoing product's uninstall, so the
+           condition keeps credentials during an upgrade and deletes them only
+           on a genuine uninstall. -->
+      <Custom Action="RemoveCredentials" After="StopServices"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
 
       <!-- Writes config.yaml. On an upgrade or a repair the file already exists
            and render-config keeps it, which is the NeverOverwrite behaviour the
-           old ConfigurableTextFile gave for free. -->
-      <Custom Action="WriteConfig" After="SecureDataFolder" Condition="NOT REMOVE" />
+           old ConfigurableTextFile gave for free. The data-directory ACL was
+           applied by CreateFolders/InstallFiles before this action. -->
+      <Custom Action="WriteConfig" After="InstallFiles" Condition="NOT REMOVE" />
 
       <Custom Action="ValidateBackupFolder" After="WriteConfig"
               Condition="NOT TESTINSTALL AND NOT REMOVE" />

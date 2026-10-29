@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +113,27 @@ func TestResolveTokenRejectsAnEmptyFile(t *testing.T) {
 	}
 	if _, _, err := resolveToken("", path); err == nil {
 		t.Error("an empty token file must be refused")
+	}
+}
+
+// The MSI uninstall cannot validate a credentials blob the agent may no longer
+// be able to decrypt, but it still must not leave the key on disk.
+func TestUnenrollForceDeletesAnUnreadableBlob(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := fmt.Sprintf("server: https://backup.softafrique.net/api/v1\nrepo: rest:https://backup.softafrique.net/{device_id}\ndata_dir: %q\n", dir)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	creds := filepath.Join(dir, "credentials.dat")
+	if err := os.WriteFile(creds, []byte("not a DPAPI blob"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdUnenroll([]string{"-yes", "-force", "-config", cfgPath}); err != nil {
+		t.Fatalf("force unenroll failed on an unreadable blob: %v", err)
+	}
+	if _, err := os.Stat(creds); !os.IsNotExist(err) {
+		t.Fatalf("credentials still exist after force unenroll: %v", err)
 	}
 }
 

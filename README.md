@@ -124,7 +124,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.21   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.22   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so

@@ -100,7 +100,7 @@ Stated here rather than discovered later:
 | | |
 | --- | --- |
 | Install | One MSI, deployed by our RMM, with the folder to protect |
-| Uninstall | Removes the service and files. Snapshots and the escrow key are unaffected, by design |
+| Uninstall | Removes the service, files and local sealed key. Snapshots and the gateway-side escrow key are unaffected |
 | Health check | A script the RMM runs on a schedule; it fails when a machine stops being protected, not only when the service stops |
 | Support | Agent log plus a machine-readable status file, both readable without a site visit |
 | Upgrade | The installer leaves the enrolled device enrolled, so a patch cannot leave a customer unprotected |
