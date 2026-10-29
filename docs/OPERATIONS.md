@@ -37,7 +37,7 @@ Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw | Convert
 | `enrolled` | `false` means the device has no key. Nothing is being protected. |
 | `server_status` | The gateway's view. Anything but `active` means backups are withheld. |
 | `action_required` | Written for a human. If it is set, read it; it says what to do. |
-| `last_attempt_status` | `running`, `success`, `failed`, `suspended` or `recreated`. `suspended` is not a failure: nothing was attempted. `recreated` means the protected folder was missing and was recreated, so the snapshot is empty: `last_success` did not move, and the fix is a site visit. |
+| `last_attempt_status` | `running`, `success`, `failed`, `suspended` or `recreated`. `suspended` is not a failure: nothing was attempted. `recreated` means the protected folder was missing and was recreated, but no snapshot was taken: `last_success` did not move, `action_required` stays set, and the fix is a site visit. |
 | `last_attempt_start` / `last_attempt_end` | Bracket the last attempt, so a `running` older than a few hours is a stuck restic. |
 | `last_success` | When data was last actually protected. This is the field that matters. |
 | `last_duration_seconds` | Wall clock, including waiting for the network. This is what to quote a customer. |

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -39,21 +40,18 @@ func TestValidateExitCodes(t *testing.T) {
 }
 
 // A customer folder that does not exist yet is not a reason to refuse the
-// install. Before this, validatepath returned 0 and left the folder missing, so
-// the agent failed every backup from then on and nobody could tell why.
-func TestValidateCreatesAMissingFolder(t *testing.T) {
+// install, but the validator must not create it. Creating it here gives the
+// folder the installing user's owner and ACL, and makes the second run answer a
+// different question from the first.
+func TestValidateAcceptsAMissingFolderWithoutCreatingIt(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "CustomerData")
 
 	if got := validate([]string{target}); got != 0 {
 		t.Fatalf("validate = %d, want 0", got)
 	}
-	info, err := os.Stat(target)
-	if err != nil {
-		t.Fatalf("the folder was not created: %v", err)
-	}
-	if !info.IsDir() {
-		t.Fatal("the created path is not a directory")
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("the folder was created; validation must have no side effect: %v", err)
 	}
 
 	// Running it twice must be harmless: the MSI can call it more than once, and
@@ -63,17 +61,17 @@ func TestValidateCreatesAMissingFolder(t *testing.T) {
 	}
 }
 
-// BACKUPPATH is routinely given as D:\Customer\Data where only the leaf is
-// missing. A one-level create would fail that with a confusing error.
-func TestValidateCreatesMissingIntermediateFolders(t *testing.T) {
+// BACKUPPATH is routinely given as D:\Customer\Data where neither level exists.
+// The missing tree is still accepted, without being built.
+func TestValidateAcceptsMissingIntermediateFolders(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "Customer", "Data")
 
 	if got := validate([]string{target}); got != 0 {
 		t.Fatalf("validate = %d, want 0", got)
 	}
-	if _, err := os.Stat(target); err != nil {
-		t.Fatalf("the nested folder was not created: %v", err)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("the nested folder was created: %v", err)
 	}
 }
 
@@ -124,13 +122,43 @@ func TestOnlyTheOptInFlagIsParsedAsAFlag(t *testing.T) {
 }
 
 // Backing up a whole drive by accident is expensive and looks like an attack,
-// so a volume root is refused. This has to be checked before the create step, or
-// "create the folder" would mean creating a directory at the root of a volume.
+// so a volume root is refused.
 func TestValidateRefusesAVolumeRoot(t *testing.T) {
-	if !isVolumeRoot(string(filepath.Separator)) {
-		t.Error("the filesystem root should be recognised as a volume root")
+	if !isVolumeRoot(filepath.VolumeName(t.TempDir()) + string(filepath.Separator)) {
+		if runtime.GOOS == "windows" {
+			t.Error("a Windows drive root should be recognised as a volume root")
+		}
 	}
-	if isVolumeRoot("/tmp") {
+	if isVolumeRoot(t.TempDir()) {
 		t.Error("an ordinary directory is not a volume root")
+	}
+}
+
+// The system-directory refusal is a Windows-path rule, so it is exercised on the
+// platform where it matters. The rule itself is tested cross-platform in
+// internal/pathpolicy.
+func TestValidateRefusesASystemDirectory(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("C:\\Windows is only an actual directory on Windows")
+	}
+	for _, path := range []string{`C:\Windows`, `C:\Program Files`, `C:\ProgramData`} {
+		if got := validate([]string{path}); got != 5 {
+			t.Errorf("validate(%q) = %d, want 5", path, got)
+		}
+	}
+}
+
+// \\server\share is a volume to Windows but a share root to a person, and must
+// not be described as a drive root.
+func TestShareRootIsRecognised(t *testing.T) {
+	for _, path := range []string{`\\server\share`, `\\server\share\`, `//server/share`} {
+		if !isShareRoot(path) {
+			t.Errorf("%q should be a share root", path)
+		}
+	}
+	for _, path := range []string{`\\server\share\folder`, `C:\`, `/tmp`} {
+		if isShareRoot(path) {
+			t.Errorf("%q is not a share root", path)
+		}
 	}
 }

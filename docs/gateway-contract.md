@@ -297,10 +297,10 @@ reason is recorded locally in `status.json` as `last_attempt_error` instead, and
 it is the line a support engineer reads.
 
 **One case arrives as `failed` even though nothing errored.** If the protected
-folder had been deleted, the agent recreates it and the backup *succeeds* — but
-the snapshot it just took is of an empty directory, so reporting `success` would
-be a lie that a device could use indefinitely. It is sent as `failed` with
-`last_backup_error` saying the folder was missing and had to be recreated.
+folder had been deleted, the agent recreates it but deliberately takes no
+snapshot, so reporting `success` would be a lie that a device could use
+indefinitely. It is sent as `failed` with `last_backup_error` saying the folder
+was missing and had to be recreated, and no backup was taken.
 `status.json` distinguishes it properly as `last_attempt_status: recreated`, and
 `health-check.ps1` calls it out by name, because "the customer deleted their data
 folder" and "the backup broke" are very different tickets. Worth knowing before

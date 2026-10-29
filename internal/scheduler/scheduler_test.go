@@ -88,6 +88,19 @@ func TestWaitUntilDueSuspendedWaitsRetryInterval(t *testing.T) {
 	}
 }
 
+func TestWaitUntilDueRecreatedFolderWaitsRetryInterval(t *testing.T) {
+	// There is an old last_success, so the schedule alone would say "overdue,
+	// run now". That would recreate the tight loop where the second run finds the
+	// folder present and snapshots it empty.
+	s := testScheduler(t, nil, nil)
+	st := status.New()
+	st.LastSuccess = status.Stamp(s.now().Add(-time.Hour))
+	st.LastAttemptStatus = status.AttemptRecreated
+	if d := s.waitUntilDue(st); d != 5*time.Minute {
+		t.Errorf("a recreated folder should wait for the retry interval, got %v", d)
+	}
+}
+
 func TestWaitUntilDueOverdueRunsNow(t *testing.T) {
 	s := testScheduler(t, nil, nil)
 	st := status.New()

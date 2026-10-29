@@ -68,8 +68,9 @@ jobs:
       # silently mistyped BACKUPPATH.
       #
       # Every case here is one a customer hit: a folder that does not exist yet
-      # (must be created, not refused), a file where a folder should be, a drive
-      # root, a path on a volume that is not there at all, and a network share.
+      # (accepted but not created by the validator), a file where a folder
+      # should be, a drive root, a path on a volume that is not there at all,
+      # and a network share.
       - name: exercise validatepath on a real filesystem
         shell: pwsh
         run: |
@@ -93,11 +94,12 @@ jobs:
           New-Item -ItemType Directory -Path $existing -Force | Out-Null
           Check 'existing folder' $existing 0
 
-          # Missing: created rather than refused. This is the case that used to
-          # install fine and then fail every backup.
+          # Missing: accepted rather than refused, but the validator must not
+          # create it. Creating it as the installing user gives the folder an
+          # owner and ACL the service may not be able to use.
           $missing = Join-Path $root 'NotCreatedYet'
-          Check 'missing folder is created' $missing 0
-          if (-not (Test-Path $missing -PathType Container)) { throw "the folder was not created" }
+          Check 'missing folder is accepted' $missing 0
+          if (Test-Path $missing) { throw "validatepath created the folder" }
 
           # A file is not a folder, and must not be deleted to become one.
           $file = Join-Path $root 'a-file'
@@ -359,7 +361,7 @@ jobs:
       # No TESTINSTALL and no ENROLLTOKENFILE: the folder check and the full
       # layout run, and the service is installed but neither started nor
       # enrolled, because both are gated on a token file. No gateway needed.
-      - name: install for real and let it create the backup folder
+      - name: install for real and accept a missing backup folder
         shell: pwsh
         run: |
           $backup = Join-Path $env:RUNNER_TEMP 'CustomerData'
@@ -373,10 +375,10 @@ jobs:
             $tail = (Get-Content real.log -Tail 30) -join "`n"
             throw "install exited $($p.ExitCode):`n$tail"
           }
-          if (-not (Test-Path $backup -PathType Container)) {
-            throw "the installer did not create $backup"
+          if (Test-Path $backup) {
+            throw "the installer created $backup; the service must create it as the account that will use it"
           }
-          Write-Host "ok  the installer created $backup"
+          Write-Host "ok  the installer accepted $backup without creating it"
 
           # The config the MSI wrote has to parse. This is checked on every build
           # because a config the agent cannot load stops the service dead at three

@@ -28,6 +28,10 @@ import (
 // to talk to and no identity to report as.
 var ErrNotEnrolled = errors.New("this device is not enrolled: run 'agent enroll --token <token>'")
 
+// ErrActionRequired means a human has to restore or correct something before a
+// backup would protect anything. The CLI maps it to exit code 4.
+var ErrActionRequired = errors.New("action required")
+
 // deviceIDPattern is what the agent will accept as a device id. The value ends
 // up as a path segment in the repository URL and as restic's --host, so
 // anything that could change which repository is addressed is rejected rather
@@ -303,7 +307,7 @@ func (a *Agent) Prepare(ctx context.Context) error {
 	a.migrateLegacySecrets()
 
 	if warn := a.cfg.DataDirACLWarning(); warn != "" {
-		a.log.Warn("data directory is not the installed location", "detail", warn)
+		a.log.Warn("data directory permissions need attention", "detail", warn)
 	}
 	if info := identity.Collect(); info.OSCaption == "" || strings.EqualFold(info.OSCaption, "Windows") {
 		a.log.Warn("could not determine the exact operating system; os_caption will be imprecise")
@@ -357,6 +361,9 @@ func (a *Agent) SelfTest(ctx context.Context) error {
 			a.log.Warn("gateway health check did not answer", "err", err)
 		}
 	}
+	// A self-test is the command support runs when status looks stale, so it is
+	// also the right time to replace stale repository counts.
+	a.RefreshStats(ctx)
 	return nil
 }
 
@@ -423,19 +430,44 @@ func (a *Agent) backupOnce(ctx context.Context) (status.Outcome, error) {
 		a.log.Error("backup withheld", "err", err)
 		return status.Outcome{Elapsed: time.Since(start), Skipped: true, Err: err}, scheduler.Terminal(err)
 	}
+	if refused := a.protectedPaths(paths); len(refused) > 0 {
+		err := protectedError(refused)
+		a.log.Error("backup withheld", "err", err)
+		return status.Outcome{Elapsed: time.Since(start), Skipped: true, Err: err}, scheduler.Terminal(err)
+	}
 
-	// The folder to protect is created if it has gone missing.
-	//
-	// Before this, a folder deleted after installation meant a device that
-	// reported a failed backup every hour, forever, until a human noticed. That
-	// is the worst of both worlds: the customer is not protected, and the only
-	// symptom is a red dashboard nobody reads.
-	//
-	// Recreating it and carrying on is right, but reporting a plain success
-	// would be a lie -- the snapshot would hold an empty directory. The paths
-	// created are carried into the Outcome so it is recorded as
-	// status.AttemptRecreated, which keeps last_success where it really was.
+	// The folder to protect is recreated if it has gone missing, but the backup
+	// is not taken. An empty snapshot is not protection: it advances nothing a
+	// dashboard can trust and makes the next run look healthy. The operator gets
+	// an action-required failure instead, naming the folder they have to restore.
 	created := a.ensureBackupPaths(paths)
+	if len(created) > 0 {
+		err := fmt.Errorf("%w: the protected folder %s was missing and has been recreated; "+
+			"no backup was taken. Confirm the customer's data is there before the next run",
+			ErrActionRequired, strings.Join(quotePaths(created), ", "))
+		a.log.Error("backup withheld", "err", err)
+		return status.Outcome{
+			Elapsed:        time.Since(start),
+			RecreatedPaths: created,
+			Err:            err,
+		}, scheduler.Terminal(err)
+	}
+
+	// The folder now exists, so the check above no longer fires on the next run.
+	// Keep answering "action required" until the customer's data is actually
+	// back, or the scheduled retry would quietly snapshot the empty directory
+	// the previous run created.
+	if pending := a.pendingRecreatedPaths(paths); len(pending) > 0 {
+		err := fmt.Errorf("%w: the protected folder %s is still empty since it was recreated; "+
+			"no backup was taken. Restore the customer's data there",
+			ErrActionRequired, strings.Join(quotePaths(pending), ", "))
+		a.log.Error("backup withheld", "err", err)
+		return status.Outcome{
+			Elapsed:        time.Since(start),
+			RecreatedPaths: pending,
+			Err:            err,
+		}, scheduler.Terminal(err)
+	}
 
 	runner := a.resticRunner()
 	a.log.Info("starting backup", "paths", paths, "device_id", a.DeviceID())
@@ -460,6 +492,12 @@ func (a *Agent) backupOnce(ctx context.Context) (status.Outcome, error) {
 		"elapsed", outcome.Elapsed.Round(time.Second),
 		"restic_duration", res.ResticDuration.Round(time.Second),
 	)
+
+	// A manual or scheduled backup is exactly when the repository counts change
+	// most, so refresh them now rather than leaving status.json with the last
+	// idle reading. This is best-effort: a stats failure must not turn a
+	// successful backup into a failure.
+	a.RefreshStats(ctx)
 	return outcome, nil
 }
 
@@ -546,13 +584,12 @@ func (a *Agent) reportStatus(ctx context.Context, outcome status.Outcome) {
 	} else if outcome.Err != nil {
 		rep.LastBackupError = outcome.Err.Error()
 	} else {
-		// The attempt did not error, but the only reason it could run is that
-		// the agent created the folder itself, so the snapshot holds an empty
-		// directory. Reporting "success" here is how a device stops protecting a
-		// customer's data without the dashboard noticing, so the contract's
-		// two values leave "failed" with the reason as the honest answer.
+		// The paths were recreated but no snapshot was taken. Reporting "success"
+		// here is how a device stops protecting a customer's data without the
+		// dashboard noticing, so the contract's two values leave "failed" with
+		// the reason as the honest answer.
 		rep.LastBackupError = "the protected folder was missing and had to be recreated, " +
-			"so this backup captured an empty folder: " + strings.Join(outcome.RecreatedPaths, ", ")
+			"so no backup was taken: " + strings.Join(outcome.RecreatedPaths, ", ")
 	}
 
 	// A long backup must not leave the report hanging on the shutdown path.
@@ -690,7 +727,10 @@ func (a *Agent) applyRemote(remote *api.RemoteConfig) {
 		st.SetGatewayState(state, action)
 		st.SetBackupPaths(a.backupPaths())
 		st.SetScheduleInterval(a.cfg.ScheduleInterval)
-		if a.action == "" {
+		// Do not wipe the recreate notice here. RefreshConfig runs at the start of
+		// every attempt, and clearing it would make the pendingRecreatedPaths guard
+		// forget an empty folder on the very next run. A real backup clears it.
+		if a.action == "" && !status.IsRecreateNotice(st.ActionRequired) {
 			st.ActionRequired = ""
 		}
 	})

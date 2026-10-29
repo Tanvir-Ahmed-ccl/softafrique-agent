@@ -124,7 +124,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.20   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.21   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so
@@ -178,9 +178,10 @@ enrolled device.
 ```
 
 `last_attempt_status` can also be `recreated`: the protected folder was missing
-and the agent recreated it, so the snapshot that followed held an empty directory.
-`last_success` does not move for a `recreated` attempt, because nothing was
-protected, and `action_required` is set until a real backup runs.
+and the agent recreated it, but no snapshot was taken. `last_success` does not
+move for a `recreated` attempt, because nothing was protected, and
+`action_required` stays set until the customer's data is back and a real backup
+runs.
 
 `last_backup_status` and `last_backup_time` are kept for monitoring scripts
 written against 0.1.0. A 0.1.0 `status.json` is migrated on read: the

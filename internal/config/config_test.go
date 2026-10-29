@@ -285,8 +285,11 @@ func TestNoConfigFieldCanCarryASecret(t *testing.T) {
 func TestACLWarningOnlyOnNonStandardDataDir(t *testing.T) {
 	cfg := Default()
 	cfg.DataDir = DefaultDataDir()
-	if w := cfg.DataDirACLWarning(); w != "" {
-		t.Errorf("standard data dir should not warn, got %q", w)
+	// The standard location can still warn about its ACL on a machine where an
+	// older installer left Users with read access. It must never warn about the
+	// location itself, which is what the MSI wrote.
+	if w := cfg.DataDirACLWarning(); strings.Contains(w, "is not the standard") {
+		t.Errorf("standard data dir was reported as non-standard, got %q", w)
 	}
 	cfg.DataDir = filepath.Join("C:", "Temp", "backup")
 	w := cfg.DataDirACLWarning()

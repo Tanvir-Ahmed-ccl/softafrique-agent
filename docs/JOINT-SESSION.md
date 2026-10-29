@@ -66,7 +66,7 @@ backup failed with *device is not ready*.
    cannot act on that.
 
 4. A fixed disk at the same letter is accepted — `C:\SoftafriqueBackup` should give
-   exit code 0 and create the folder.
+   exit code 0 without creating the folder; the agent creates it on the first backup.
 
 ---
 
@@ -138,7 +138,7 @@ the technician who set it up. This part proves both halves of that.
 
 The fix for the case where a customer's protected folder is deleted after
 installation. It must be recreated, and it must **not** be reported as a green
-backup, because the snapshot is of an empty directory.
+backup or snapshotted while empty.
 
 ```powershell
 $protected = 'D:\CustomerData'   # whatever it actually is

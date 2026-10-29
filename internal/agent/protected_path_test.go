@@ -15,18 +15,14 @@ import (
 )
 
 // These cover the behaviour asked for after a customer's protected folder was
-// deleted after installation: the agent should recreate it and carry on, rather
-// than report a failed backup every hour until a human noticed.
-//
-// The design decision under test is the one in internal/status: a recreate is
-// recorded as its own state rather than as a success, because the snapshot that
-// follows holds an empty directory. Both halves matter. Recreating without the
-// distinct state is the "always green" lie 0.2.0 was written to remove; the
-// distinct state without recreating is the permanently red device we are fixing.
+// deleted after installation. The agent recreates the folder so a restore has a
+// destination, but it does not snapshot the empty directory and call that
+// protection. It records an action-required failure instead, which the CLI
+// returns as exit code 4.
 
-// The headline case: a folder deleted after installation is recreated and the
-// attempt is not a failure, so the device does not go permanently red.
-func TestDeletedProtectedFolderIsRecreatedAndNotAFailure(t *testing.T) {
+// The headline case: a folder deleted after installation is recreated, but
+// restic is not run and the operator is told to restore the data.
+func TestDeletedProtectedFolderIsRecreatedButNotBackedUp(t *testing.T) {
 	protected := customerDataDir(t)
 	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: protected}}
 	rest := &fakeRestic{}
@@ -46,8 +42,11 @@ func TestDeletedProtectedFolderIsRecreatedAndNotAFailure(t *testing.T) {
 	}
 
 	outcome, err := a.BackupNow(context.Background())
-	if err != nil {
-		t.Fatalf("a recreated folder must not fail the attempt: %v", err)
+	if !errors.Is(err, ErrActionRequired) {
+		t.Fatalf("err = %v, want ErrActionRequired", err)
+	}
+	if !scheduler.IsTerminal(err) {
+		t.Error("a missing protected folder needs a human, not an automatic retry")
 	}
 	if len(outcome.RecreatedPaths) != 1 || outcome.RecreatedPaths[0] != protected {
 		t.Errorf("RecreatedPaths = %v, want [%s]", outcome.RecreatedPaths, protected)
@@ -55,8 +54,8 @@ func TestDeletedProtectedFolderIsRecreatedAndNotAFailure(t *testing.T) {
 	if info, err := os.Stat(protected); err != nil || !info.IsDir() {
 		t.Fatalf("the folder was not recreated: %v", err)
 	}
-	if rest.backups != 2 {
-		t.Errorf("restic ran %d times, want 2", rest.backups)
+	if rest.backups != 1 {
+		t.Errorf("restic ran %d times, want 1: the empty recreated folder must not be snapshotted", rest.backups)
 	}
 
 	st, err := a.store.Load()
@@ -64,15 +63,18 @@ func TestDeletedProtectedFolderIsRecreatedAndNotAFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if st.ConsecutiveFailures != 0 {
-		t.Errorf("consecutive_failures = %d, want 0: nothing failed", st.ConsecutiveFailures)
+		t.Errorf("consecutive_failures = %d, want 0: the customer's data is missing, not the repository", st.ConsecutiveFailures)
 	}
 	if st.LastAttemptStatus != status.AttemptRecreated {
 		t.Errorf("last attempt = %q, want %q", st.LastAttemptStatus, status.AttemptRecreated)
 	}
+	if st.ActionRequired == "" {
+		t.Error("action_required must be set, or nothing alerts on this")
+	}
 }
 
-// The reason this is not reported as a plain success: the snapshot that followed
-// the recreate holds an empty directory, so nothing was actually protected.
+// The reason this is not reported as a plain success: the recreated directory
+// is empty and no snapshot is taken, so nothing was actually protected.
 // last_success must not move, or the staleness threshold can never fire.
 func TestRecreatedFolderDoesNotCountAsProtected(t *testing.T) {
 	protected := customerDataDir(t)
@@ -94,8 +96,8 @@ func TestRecreatedFolderDoesNotCountAsProtected(t *testing.T) {
 	if err := os.RemoveAll(protected); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.BackupNow(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, err := a.BackupNow(context.Background()); !errors.Is(err, ErrActionRequired) {
+		t.Fatalf("err = %v, want ErrActionRequired", err)
 	}
 	st, err := a.store.Load()
 	if err != nil {
@@ -135,8 +137,8 @@ func TestRecreatedFolderIsNotReportedToTheGatewayAsSuccess(t *testing.T) {
 	if err := os.RemoveAll(protected); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.BackupNow(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, err := a.BackupNow(context.Background()); !errors.Is(err, ErrActionRequired) {
+		t.Fatalf("err = %v, want ErrActionRequired", err)
 	}
 
 	if len(gw.reports) == 0 {
@@ -162,8 +164,8 @@ func TestRecreateNoticeClearsOnACleanRun(t *testing.T) {
 	if err := os.RemoveAll(protected); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.BackupNow(context.Background()); err != nil {
-		t.Fatal(err)
+	if _, err := a.BackupNow(context.Background()); !errors.Is(err, ErrActionRequired) {
+		t.Fatalf("err = %v, want ErrActionRequired", err)
 	}
 	st, err := a.store.Load()
 	if err != nil {
@@ -210,10 +212,13 @@ func TestRecreateNoticeDoesNotClearAGatewayReenrollInstruction(t *testing.T) {
 	}
 }
 
-// The recreate must not paper over a real failure: if restic errors, that is a
-// failure like any other.
+// The recreate must not hide a real restic failure. Give the folder real
+// content so the backup actually runs, then make restic fail.
 func TestRecreateDoesNotHideABackupFailure(t *testing.T) {
-	protected := filepath.Join(t.TempDir(), "CustomerData")
+	protected := customerDataDir(t)
+	if err := os.WriteFile(filepath.Join(protected, "data.db"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: protected}}
 	rest := &fakeRestic{err: errors.New("restic: snapshot failed")}
 	a := newTestAgent(t, gw, rest)
@@ -269,6 +274,88 @@ func TestEnsureBackupPathsReportsOnlyWhatItCreated(t *testing.T) {
 	created := a.ensureBackupPaths([]string{present, gone, ""})
 	if len(created) != 1 || created[0] != gone {
 		t.Errorf("created = %v, want just [%s]", created, gone)
+	}
+}
+
+// A fixed disk is not a licence to back up the operating system or the agent's
+// own key store. The installer checks the typed path; this catches a path the
+// gateway supplies later.
+func TestSystemAndAgentDirectoriesAreRefusedBeforeRestic(t *testing.T) {
+	for _, path := range []string{`C:\Windows`, `C:\Program Files`, `C:\ProgramData`} {
+		gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: path}}
+		rest := &fakeRestic{}
+		a := newTestAgent(t, gw, rest)
+		enrollTest(t, a)
+
+		_, err := a.RunBackup(context.Background())
+		if err == nil {
+			t.Errorf("%s was backed up", path)
+			continue
+		}
+		if !scheduler.IsTerminal(err) {
+			t.Errorf("%s: err = %v, want terminal", path, err)
+		}
+		if rest.backups != 0 {
+			t.Errorf("%s: restic ran %d times", path, rest.backups)
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("error %q does not name %s", err, path)
+		}
+	}
+
+	// The data directory is supplied by config, not a fixed Windows path.
+	a := newTestAgent(t, &fakeGateway{}, &fakeRestic{})
+	if got := a.protectedPaths([]string{a.cfg.DataDir}); len(got) != 1 {
+		t.Errorf("the agent data directory was accepted: %v", got)
+	}
+}
+
+// The recreation guard has to survive the next run: after the first run creates
+// the folder, the missing-path check no longer fires, so without a persistent
+// marker the retry would snapshot the empty folder. Once real data is back, the
+// notice must clear itself.
+func TestRecreatedFolderStaysActionRequiredUntilDataReturns(t *testing.T) {
+	protected := customerDataDir(t)
+	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: protected}}
+	rest := &fakeRestic{}
+	a := newTestAgent(t, gw, rest)
+	enrollTest(t, a)
+
+	if _, err := a.BackupNow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.RemoveAll(protected); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.BackupNow(context.Background()); !errors.Is(err, ErrActionRequired) {
+		t.Fatalf("first run over the missing folder: err = %v, want ErrActionRequired", err)
+	}
+	// The folder now exists but is empty. This is the run that used to go green.
+	if _, err := a.BackupNow(context.Background()); !errors.Is(err, ErrActionRequired) {
+		t.Fatalf("second run over the recreated folder: err = %v, want ErrActionRequired", err)
+	}
+	if rest.backups != 1 {
+		t.Fatalf("restic ran %d times, want 1: an empty recreated folder must never be snapshotted", rest.backups)
+	}
+
+	// The customer's data is restored; the next run protects it and clears the
+	// local instruction.
+	if err := os.WriteFile(filepath.Join(protected, "data.db"), []byte("customer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.BackupNow(context.Background()); err != nil {
+		t.Fatalf("backup after restore: %v", err)
+	}
+	st, err := a.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ActionRequired != "" {
+		t.Errorf("action_required = %q, want empty after a real backup", st.ActionRequired)
+	}
+	if st.LastAttemptStatus != status.AttemptSuccess {
+		t.Errorf("last attempt = %q, want success", st.LastAttemptStatus)
 	}
 }
 

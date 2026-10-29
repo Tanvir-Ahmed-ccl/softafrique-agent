@@ -309,6 +309,26 @@ func TestSuccessfulBackupIsReported(t *testing.T) {
 	if rep.AgentVersion != a.Version {
 		t.Errorf("agent_version = %q, want %q", rep.AgentVersion, a.Version)
 	}
+
+	// The usage block used to keep whatever enrollment wrote, so a customer saw
+	// snapshot_count frozen while backups kept arriving. A successful backup is
+	// the moment the counts change most, so take a fresh reading.
+	st, err := a.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.RepoStats == nil {
+		t.Fatal("a successful backup left repo_stats empty")
+	}
+	if st.RepoStats.SnapshotCount != 3 {
+		t.Errorf("snapshot_count = %d, want the fresh reading 3", st.RepoStats.SnapshotCount)
+	}
+	if st.RepoStats.CapturedAt == "" {
+		t.Error("repo_stats has no captured_at")
+	}
+	if rest.statsCalls < 2 {
+		t.Errorf("stats ran %d times, want raw-data and restore-size", rest.statsCalls)
+	}
 }
 
 // A failed backup is reported as failed, and the status file must not lose the

@@ -165,14 +165,19 @@ func (c *Config) DataDirACLWarning() string {
 	if runtime.GOOS != "windows" {
 		return ""
 	}
+	var warnings []string
+	if w := dataDirACLWarning(c.DataDir); w != "" {
+		warnings = append(warnings, w)
+	}
 	want := filepath.Clean(DefaultDataDir())
 	got := filepath.Clean(c.DataDir)
-	if strings.EqualFold(want, got) {
-		return ""
+	if !strings.EqualFold(want, got) {
+		warnings = append(warnings, "data_dir "+c.DataDir+" is not the standard "+want+
+			"; its access control list is whatever it was created with, so the credentials blob there "+
+			"is only protected against non-administrators. Reinstall from the MSI, or have an administrator "+
+			"restrict the folder to SYSTEM and Administrators.")
 	}
-	return "data_dir " + c.DataDir + " is not the standard " + want +
-		"; its access control list is whatever it was created with, so the credentials blob there is only protected against non-administrators. " +
-		"Reinstall from the MSI, or have an administrator restrict the folder to SYSTEM and Administrators."
+	return strings.Join(warnings, " ")
 }
 
 // Stats reports whether periodic repository usage readings are enabled.

@@ -419,6 +419,24 @@ func TestRecreateNoticeDoesNotClobberAGatewayInstruction(t *testing.T) {
 	}
 }
 
+// RefreshConfig runs before every attempt. It must not erase the recreate
+// notice, or the empty-folder guard has nothing to key on the next time.
+func TestGatewayRefreshDoesNotClearTheRecreateNotice(t *testing.T) {
+	st := New()
+	st.MarkFinished(time.Now(), Outcome{SnapshotID: "e", RecreatedPaths: []string{`D:\CustomerData`}})
+	notice := st.ActionRequired
+	if notice == "" {
+		t.Fatal("expected a notice")
+	}
+	st.SetGatewayState("active", "")
+	if st.ActionRequired != notice {
+		t.Errorf("action_required = %q, want the recreate notice preserved", st.ActionRequired)
+	}
+	if st.ServerStatus != "active" {
+		t.Errorf("server_status = %q, want active", st.ServerStatus)
+	}
+}
+
 // The notice has to clear itself, or a device alerts forever after one deleted
 // folder.
 func TestRecreateNoticeIsClearedByTheNextCleanRun(t *testing.T) {

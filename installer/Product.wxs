@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.20" ?>
+<?define ProductVersion="0.2.21" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -168,9 +168,16 @@
     <Component Id="DataFolderAcl" Guid="5C8A6EC4-3F71-4D95-8EA1-6A4B3C9FBE55" Directory="DATAFOLDER">
       <!-- No KeyPath here, on purpose. A component with no keypath is a
            directory-keypath component, and Windows Installer only applies
-           LockPermissions to those, so this is what makes the DACL below stick.
-           Putting a keypath on the DataDir value instead, as an earlier draft
-           did, silently left the credentials folder at inherited permissions. -->
+           LockPermissions to those, so this is what makes the explicit ACEs
+           below stick. Putting a keypath on the DataDir value instead, as an
+           earlier draft did, silently left the credentials folder at inherited
+           permissions.
+
+           PermissionEx writes explicit ACEs but cannot remove the inherited
+           Users ACE from %ProgramData%, which is why SecureDataFolder runs
+           icacls afterwards. The explicit grants stay here too: they are the
+           declarative record of who should have access, and they survive a
+           repair even if the custom action is skipped. -->
       <CreateFolder>
         <util:PermissionEx User="SYSTEM" GenericAll="yes" Inheritable="yes" />
         <util:PermissionEx User="Administrators" GenericAll="yes" Inheritable="yes" />
@@ -283,6 +290,19 @@
          CustomActionData, and WixQuietExec reads CustomActionData in
          preference to WixQuietExec64CmdLine. Naming them anything else, as an
          earlier draft did, silently handed the action an empty command line. -->
+    <!--
+      PermissionEx adds explicit SYSTEM and Administrators ACEs, but it does not
+      stop the folder inheriting BUILTIN\Users:(RX) from %ProgramData%. On a
+      default Server install that left credentials.dat readable by every local
+      user, which is exactly the boundary that machine-scope DPAPI relies on.
+      icacls is the one supported tool here that can both break inheritance and
+      replace the trustee list; the SIDs are used instead of localised group
+      names so this works on a non-English Windows.
+    -->
+    <SetProperty Id="SecureDataFolder"
+                 Value="&quot;[SystemFolder]icacls.exe&quot; &quot;[DATAFOLDER]&quot; /inheritance:r /grant:r &quot;*S-1-5-18:(OI)(CI)F&quot; &quot;*S-1-5-32-544:(OI)(CI)F&quot; /remove:g &quot;*S-1-5-32-545&quot; &quot;*S-1-5-11&quot; &quot;*S-1-1-0&quot;"
+                 Before="SecureDataFolder" Sequence="execute" />
+
     <SetProperty Id="WriteConfig"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]&quot;"
                  Before="WriteConfig" Sequence="execute" />
@@ -321,6 +341,13 @@
           above. An action given neither arrives with an empty command line and
           succeeds at nothing, which is the quietest possible failure.
     -->
+    <CustomAction Id="SecureDataFolder"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
     <CustomAction Id="WriteConfig"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
@@ -353,10 +380,14 @@
                   Impersonate="no" />
 
     <InstallExecuteSequence>
+      <!-- Removes inherited access and leaves SYSTEM + Administrators on the
+           data directory before anything writes a credential into it. -->
+      <Custom Action="SecureDataFolder" After="InstallFiles" Condition="NOT REMOVE" />
+
       <!-- Writes config.yaml. On an upgrade or a repair the file already exists
            and render-config keeps it, which is the NeverOverwrite behaviour the
            old ConfigurableTextFile gave for free. -->
-      <Custom Action="WriteConfig" After="InstallFiles" Condition="NOT REMOVE" />
+      <Custom Action="WriteConfig" After="SecureDataFolder" Condition="NOT REMOVE" />
 
       <Custom Action="ValidateBackupFolder" After="WriteConfig"
               Condition="NOT TESTINSTALL AND NOT REMOVE" />
@@ -415,9 +446,10 @@
       the keyboard running msiexec without /qn.
 
       Validation is unchanged and does run for every install, prompted or not:
-      the ValidateBackupFolder action creates the folder and refuses a
-      non-fixed volume, from the execute sequence, which every install mode goes
-      through. This dialog only collects the value.
+      the ValidateBackupFolder action checks the folder and refuses a non-fixed
+      volume, from the execute sequence, which every install mode goes through.
+      It deliberately creates nothing; the agent does that as LocalSystem on the
+      first backup. This dialog only collects the value.
 
       What the dialog cannot do is report a refusal: the check is deferred, so a
       bad path ends the install with a rollback and the reason in the log. The

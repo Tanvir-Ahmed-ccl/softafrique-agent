@@ -74,6 +74,54 @@ func TestAnEmptyPathIsNotAShare(t *testing.T) {
 	}
 }
 
+// A fixed disk is not enough: C:\Windows is not a customer folder. This is the
+// check the validator was missing when it accepted system directories.
+func TestRequireNotProtectedRefusesSystemAndAgentDirectories(t *testing.T) {
+	cases := []string{
+		`C:\Windows`,
+		`C:\Windows\System32`,
+		`C:\Program Files`,
+		`C:\Program Files\Vendor`,
+		`C:\ProgramData`,
+		`C:\ProgramData\SoftafriqueBackupAgent`,
+	}
+	for _, path := range cases {
+		err := RequireNotProtected(path, `C:\ProgramData\SoftafriqueBackupAgent`)
+		if !IsProtected(err) {
+			t.Errorf("%q was accepted; it is a system or agent directory", path)
+			continue
+		}
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("refusal %q does not name the path", err)
+		}
+	}
+
+	// Case and separator differences are the same Windows location.
+	if err := RequireNotProtected(`c:/windows/system32`); !IsProtected(err) {
+		t.Error("a differently-spelled Windows path was accepted")
+	}
+
+	// A customer folder on the same fixed disk stays allowed, or the rule would
+	// refuse exactly the folder the agent exists to protect.
+	for _, path := range []string{`C:\SoftafriqueBackup`, `D:\Customer\Data`, `C:\WindowsApps\Customer`} {
+		if err := RequireNotProtected(path); err != nil {
+			t.Errorf("%q was refused: %v", path, err)
+		}
+	}
+}
+
+// The data directory moves with config, so the caller supplies it. Backing up
+// the agent's own credential store would copy the key into the repository.
+func TestRequireNotProtectedHonoursAnExtraDirectory(t *testing.T) {
+	dir := `D:\AgentState`
+	if err := RequireNotProtected(`D:\AgentState\credentials.dat`, dir); !IsProtected(err) {
+		t.Error("the agent's own data directory was accepted")
+	}
+	if err := RequireNotProtected(`D:\CustomerData`, dir); err != nil {
+		t.Errorf("a customer folder was refused: %v", err)
+	}
+}
+
 func TestIsUnmountedOnlyMatchesAnEmptyVolume(t *testing.T) {
 	if IsUnmounted(&Error{Path: `D:\Data`, Kind: KindOptical}) {
 		t.Error("an optical drive was reported as an unmounted drive")

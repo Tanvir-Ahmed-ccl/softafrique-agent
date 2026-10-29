@@ -130,6 +130,9 @@ func TestExitCodesAreDistinct(t *testing.T) {
 	if got := exitCodeFor(actionRequired("re-enroll the device")); got != exitActionRequired {
 		t.Errorf("an action-required error gave %d, want %d", got, exitActionRequired)
 	}
+	if got := exitCodeFor(agent.ErrActionRequired); got != exitActionRequired {
+		t.Errorf("agent.ErrActionRequired gave %d, want %d", got, exitActionRequired)
+	}
 }
 
 // A device that has never had a successful backup must not be reported as

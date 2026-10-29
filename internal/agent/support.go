@@ -11,6 +11,7 @@ import (
 	"softafrique-backup-agent/internal/pathpolicy"
 	"softafrique-backup-agent/internal/restic"
 	"softafrique-backup-agent/internal/secret"
+	"softafrique-backup-agent/internal/status"
 )
 
 // probeRestic builds a restic wrapper for credentials that have not been stored
@@ -147,6 +148,64 @@ func (a *Agent) refusedPaths(paths []string) []*pathpolicy.Error {
 		}
 	}
 	return refused
+}
+
+// quotePaths renders Windows paths without %q's doubled backslashes.
+func quotePaths(paths []string) []string {
+	quoted := make([]string, 0, len(paths))
+	for _, p := range paths {
+		quoted = append(quoted, `"`+p+`"`)
+	}
+	return quoted
+}
+
+// protectedPaths returns paths that are system locations or the agent's own
+// data directory. The installer applies this to the typed path; this catches a
+// path that arrived later from the gateway or a hand-edited config.
+func (a *Agent) protectedPaths(paths []string) []*pathpolicy.ProtectedError {
+	var refused []*pathpolicy.ProtectedError
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if err := pathpolicy.RequireNotProtected(p, a.cfg.DataDir); err != nil {
+			var perr *pathpolicy.ProtectedError
+			if errors.As(err, &perr) {
+				refused = append(refused, perr)
+				continue
+			}
+			refused = append(refused, &pathpolicy.ProtectedError{Path: p, Root: a.cfg.DataDir})
+		}
+	}
+	return refused
+}
+
+// pendingRecreatedPaths returns the protected folders that are still empty since
+// the agent recreated them. A later run sees the folders exist, so without this
+// guard the "do not snapshot an empty folder" rule would last exactly one cycle.
+func (a *Agent) pendingRecreatedPaths(paths []string) []string {
+	st, err := a.store.Load()
+	if err != nil || st == nil || !status.IsRecreateNotice(st.ActionRequired) {
+		return nil
+	}
+	var pending []string
+	for _, p := range paths {
+		entries, err := os.ReadDir(p)
+		if err == nil && len(entries) == 0 {
+			pending = append(pending, p)
+		}
+	}
+	return pending
+}
+
+// protectedError builds the sentence for a system or agent-owned path.
+func protectedError(refused []*pathpolicy.ProtectedError) error {
+	parts := make([]string, 0, len(refused))
+	for _, r := range refused {
+		parts = append(parts, fmt.Sprintf("%s (inside %s)", r.Path, r.Root))
+	}
+	return fmt.Errorf("refusing to protect %s: a system directory or the agent's own data directory "+
+		"is not a customer folder", strings.Join(parts, ", "))
 }
 
 // refusalError builds the sentence that goes into status.json.

@@ -103,10 +103,10 @@ if ($st.action_required) {
 }
 
 # A recreated folder. The attempt itself did not error, so consecutive_failures
-# stays 0 and nothing else here would catch it, but the snapshot that followed
-# held an empty directory: the device is running, reporting, and protecting
-# nothing. Called out separately because the fix is a site visit, not a restart,
-# and because it is the one condition that is greppable on its own state.
+# stays 0 and nothing else here would catch it, but no snapshot was taken: the
+# device is running, reporting, and protecting nothing. Called out separately
+# because the fix is a site visit, not a restart, and because it is the one
+# condition that is greppable on its own state.
 if ($st.last_attempt_status -eq 'recreated') {
     $where = if ($st.last_attempt_error) { $st.last_attempt_error } else { 'no detail recorded' }
     Add-Problem "the protected folder was missing and was recreated empty: $where"

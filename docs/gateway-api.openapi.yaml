@@ -514,10 +514,10 @@ components:
             move a device to a new folder without an installer run.
 
             **The agent creates it if it is missing**, including the whole path
-            tree, and then reports the attempt as `recreated` rather than as a
-            success — a snapshot of a folder the agent had to create is a snapshot
-            of an empty directory, and reporting that as green is the lie 0.2.0
-            was written to remove.
+            tree, but takes no snapshot and reports the attempt as `recreated`
+            with action required. A snapshot of a folder the agent just created
+            is a snapshot of an empty directory, and reporting that as green is
+            the lie 0.2.0 was written to remove.
 
             It must be on a **fixed disk**. A network share, an optical drive and
             a removable drive are all refused, and the refusal is terminal and

@@ -36,6 +36,14 @@ func acquire() (Lock, error) {
 			_ = windows.CloseHandle(h)
 			return nil, ErrHeld
 		}
+		// The service creates the Global mutex as SYSTEM. An unelevated or
+		// differently-privileged process can be refused access to it before it
+		// even learns that it exists; from the operator's point of view that is
+		// still "the service is running", not a mysterious Access is denied.
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			_ = windows.CloseHandle(h)
+			return nil, ErrHeld
+		}
 		return nil, err
 	}
 	return &winLock{handle: h}, nil

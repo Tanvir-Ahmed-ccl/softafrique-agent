@@ -37,6 +37,8 @@ package pathpolicy
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -179,6 +181,101 @@ func decide(path string, kind Kind, allowUNC bool, optIn string) error {
 	// safety, and offering a flag that cannot help would only send somebody
 	// looking for one.
 	return &Error{Path: path, Kind: kind}
+}
+
+// ProtectedError refuses a folder that is a system location or the agent's own
+// state directory.
+//
+// The volume rule says "is this a disk that will still be there tomorrow". This
+// says "is this somebody's data at all". A fixed disk does not make C:\Windows a
+// customer folder, and backing it up is simultaneously enormous, useless, and a
+// way to copy system secrets into a repository.
+type ProtectedError struct {
+	Path string
+	Root string
+}
+
+func (e *ProtectedError) Error() string {
+	return fmt.Sprintf("%s is inside %s, which the agent will not back up; choose the customer's data folder instead",
+		e.Path, e.Root)
+}
+
+// IsProtected reports whether err is a refusal because path is a system or
+// agent directory.
+func IsProtected(err error) bool {
+	var e *ProtectedError
+	return errors.As(err, &e)
+}
+
+// RequireNotProtected refuses system directories and any extra folders the
+// caller owns, such as the agent's data directory.
+//
+// Both the installer and the running agent call this, for the same reason the
+// volume rule is shared: the folder can be typed at install time or later sent
+// by the gateway, and two copies of the rule would eventually disagree. Extra
+// paths matter because a hand-written config can move data_dir anywhere; the
+// agent must not then back up its own credentials and status files.
+func RequireNotProtected(path string, extra ...string) error {
+	for _, root := range protectedRoots(extra) {
+		if under(path, root) {
+			return &ProtectedError{Path: filepath.Clean(path), Root: filepath.Clean(root)}
+		}
+	}
+	return nil
+}
+
+// protectedRoots is the list of locations that are never a customer folder.
+//
+// The conventional Windows paths are included even when this package is running
+// on a developer's Mac, so the rule can be unit-tested anywhere and so a Windows
+// path supplied to a non-Windows build is still judged by the same text. The
+// environment variables make it correct on a machine where Windows is installed
+// somewhere unusual or Program Files has moved.
+func protectedRoots(extra []string) []string {
+	drive := os.Getenv("SystemDrive")
+	if drive == "" {
+		drive = `C:`
+	}
+	candidates := []string{
+		os.Getenv("SystemRoot"),
+		drive + `\Windows`,
+		os.Getenv("ProgramFiles"),
+		drive + `\Program Files`,
+		os.Getenv("ProgramFiles(x86)"),
+		drive + `\Program Files (x86)`,
+		os.Getenv("ProgramData"),
+		drive + `\ProgramData`,
+	}
+	candidates = append(candidates, extra...)
+
+	roots := make([]string, 0, len(candidates))
+	for _, root := range candidates {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		roots = append(roots, root)
+	}
+	return roots
+}
+
+// under reports whether path is root or a descendant of it, comparing Windows
+// paths case-insensitively and treating both separators alike. The textual
+// comparison is deliberate: this decides whether to touch a path, and resolving
+// a junction or asking the filesystem would already be the access being gated.
+func under(path, root string) bool {
+	p := normalizeForCompare(path)
+	r := normalizeForCompare(root)
+	if p == "" || r == "" {
+		return false
+	}
+	return p == r || strings.HasPrefix(p, r+`\`)
+}
+
+func normalizeForCompare(path string) string {
+	p := strings.TrimSpace(path)
+	p = strings.ReplaceAll(p, "/", `\`)
+	p = strings.TrimRight(p, `\`)
+	return strings.ToLower(p)
 }
 
 // IsUNC reports whether a path is a Windows UNC path, \\server\share\folder.

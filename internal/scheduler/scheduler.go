@@ -109,6 +109,14 @@ func (s *Scheduler) waitUntilDue(st *status.Status) time.Duration {
 	if st.LastAttemptStatus == status.AttemptSuspended {
 		return s.cfg.RetryInterval
 	}
+	// A recreated folder is terminal for this attempt, but not for the device:
+	// the agent keeps checking until the customer's data is back. Without this
+	// sleep, an old LastSuccess makes the loop run again immediately, and the
+	// old behaviour of snapshotting the empty folder comes back through the
+	// scheduled path.
+	if st.LastAttemptStatus == status.AttemptRecreated {
+		return s.cfg.RetryInterval
+	}
 	if st.LastSuccess == "" {
 		return 0
 	}

@@ -121,6 +121,7 @@ func run(args []string) int {
 	case "restore":
 		err = cmdRestore(rest)
 	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
 		usage(os.Stderr)
 		return exitUsage
 	}
@@ -142,6 +143,8 @@ func exitCodeFor(err error) int {
 		return exitOK
 	case errors.Is(err, agent.ErrNotEnrolled), errors.Is(err, secret.ErrNotFound):
 		return exitNotEnrolled
+	case errors.Is(err, agent.ErrActionRequired):
+		return exitActionRequired
 	case errors.Is(err, context.Canceled):
 		return exitOK
 	case isActionRequired(err):
@@ -977,7 +980,7 @@ Examples:
   agent enroll
   agent run -config %s
   agent backup
-  agent restore -snapshot latest -target C:\\SoftafriqueRestore
+  agent restore -snapshot latest -target C:\SoftafriqueRestore
 `, Version, config.DefaultConfigPath(), EnrollTokenEnv, config.DefaultConfigPath())
 }
 

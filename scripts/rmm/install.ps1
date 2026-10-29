@@ -113,26 +113,17 @@ if ($AllowUNC -and $volumeOf -eq 'a network share') {
     Write-Step "ALLOWING a network share at $BackupPath on request: verify the machine account can read it before you close this task"
 }
 
-# The backup folder is created if it is missing, not refused.
-#
-# This used to be a hard failure, which was the strictest of the three checks in
-# the install path and disagreed with both of the others: the MSI's own
-# validatepath helper deliberately allowed a missing folder, and the agent
-# recreates one at run time. A customer folder that does not exist yet is a
-# normal thing to be asked to protect, and refusing it meant a technician had to
-# create the folder by hand before the RMM would deploy.
+# A missing backup folder is accepted, not refused, but this script must not
+# create it. Creating it here gives the folder the RMM user's owner and ACL,
+# while the agent runs as LocalSystem; the service creates it on its first run
+# as the account that will actually use it.
 #
 # A path that exists but is a *file* is still refused, because that is a
 # misconfiguration rather than a folder awaiting data.
 if (Test-Path $BackupPath -PathType Leaf) {
     Write-Fail "backup path $BackupPath is a file, not a folder"
 } elseif (-not (Test-Path $BackupPath -PathType Container)) {
-    try {
-        New-Item -ItemType Directory -Path $BackupPath -Force -ErrorAction Stop | Out-Null
-        Write-Step "created backup folder $BackupPath"
-    } catch {
-        Write-Fail "could not create backup folder ${BackupPath}: $($_.Exception.Message)"
-    }
+    Write-Step "backup folder $BackupPath does not exist yet; the agent will create it when it first backs up"
 }
 
 $log = Join-Path $env:TEMP "softafrique-install-$([guid]::NewGuid().ToString('N')).log"
