@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -429,6 +430,15 @@ func TestANetworkShareRefusalIsRecordedWithItsReason(t *testing.T) {
 // The opt-in exists, so it has to work, or it is not an opt-in.
 func TestTheOptInAllowsANetworkShare(t *testing.T) {
 	const share = `\\fileserver\CustomerData`
+	if runtime.GOOS != "windows" {
+		// Off Windows a UNC path is just a filename with backslashes. Put the test
+		// in a scratch directory and create that name so ensureBackupPaths sees an
+		// existing share instead of creating one in the source tree.
+		t.Chdir(t.TempDir())
+		if err := os.MkdirAll(share, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	gw := &fakeGateway{config: &api.RemoteConfig{Status: api.StateActive, BackupPath: share}}
 	rest := &fakeRestic{}
 	a := newTestAgent(t, gw, rest)
