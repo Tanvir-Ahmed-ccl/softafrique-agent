@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
+<?ifndef ProductVersion ?>
+<?define ProductVersion="0.2.20" ?>
+<?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
   WixToolset.Util, no v3 compatibility layer).
@@ -38,9 +41,13 @@
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
+  <!-- ProductVersion is what Windows uses to decide whether a package is an
+       upgrade. It must come from the same VERSION the binary is built with, not
+       a value edited by hand and left behind. The build passes it with
+       -d ProductVersion=...; the define above is only the standalone default. -->
   <Package Name="Softafrique Backup Agent"
            Manufacturer="Softafrique"
-           Version="0.2.19.0"
+           Version="$(var.ProductVersion)"
            UpgradeCode="6C7A1F52-9E4B-4E2C-9C1F-2D8A5B7E0F34"
            Scope="perMachine"
            Compressed="yes"

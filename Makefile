@@ -3,7 +3,7 @@
 # Development happens on macOS; the customer agent ships as a Windows exe. The
 # MSI can only be built on Windows with the WiX toolset on PATH.
 
-VERSION         ?= 0.2.0
+VERSION         ?= 0.2.20
 WIN_TARGET      ?= build/bin/SoftafriqueBackupAgent.exe
 VALIDATE_TARGET ?= build/bin/validatepath.exe
 MAC_TARGET      ?= build/bin/agent
@@ -74,6 +74,7 @@ WIXBIND = -bindpath bin=$(CURDIR)/build/bin -bindpath res=$(CURDIR)/installer
 ## msi: build the unsigned pilot MSI (requires wix on PATH, Windows only)
 msi: build-windows
 	wix build installer/Product.wxs -arch x64 $(WIXEXT) $(WIXBIND) \
+		-d ProductVersion=$(VERSION) \
 		-o installer/SoftafriqueBackupAgent-$(VERSION)-unsigned.msi
 	@size=$$(wc -c < installer/SoftafriqueBackupAgent-$(VERSION)-unsigned.msi); \
 		echo "MSI size: $$size bytes"; \
@@ -86,7 +87,8 @@ msi: build-windows
 
 ## msi-layout: resolve the WiX source without producing an MSI, for review
 msi-layout:
-	wix build installer/Product.wxs -arch x64 $(WIXEXT) $(WIXBIND) -o nul
+	wix build installer/Product.wxs -arch x64 $(WIXEXT) $(WIXBIND) \
+		-d ProductVersion=$(VERSION) -o nul
 
 ## clean: remove build output
 clean:

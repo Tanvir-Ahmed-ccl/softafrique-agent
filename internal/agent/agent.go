@@ -852,6 +852,20 @@ func (a *Agent) Restore(ctx context.Context, snapshot, target string, include []
 	return runner.Restore(ctx, snapshot, target, include)
 }
 
+// Snapshots lists every recovery point in this device's repository.
+func (a *Agent) Snapshots(ctx context.Context) ([]restic.Snapshot, error) {
+	if err := a.load(); err != nil {
+		return nil, err
+	}
+	runner, ok := a.resticRunner().(interface {
+		Snapshots(ctx context.Context) ([]restic.Snapshot, error)
+	})
+	if !ok {
+		return nil, errors.New("restic runner does not support snapshot listing")
+	}
+	return runner.Snapshots(ctx)
+}
+
 // LatestSnapshot returns the most recent snapshot, or nil.
 func (a *Agent) LatestSnapshot(ctx context.Context) (*restic.Snapshot, error) {
 	if err := a.load(); err != nil {

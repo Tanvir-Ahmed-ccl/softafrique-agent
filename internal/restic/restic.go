@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -91,9 +92,15 @@ type Options struct {
 	Binary string
 	// Repository is the restic repository URL. It must not contain credentials.
 	Repository string
-	// Host is the value passed to restic --host. It is the enrollment-assigned
-	// device id, and it must be the same value the gateway knows the device by,
-	// otherwise central reporting cannot attribute a snapshot to a device.
+	// Host is the value written to restic's snapshot hostname at backup time. It
+	// is the enrollment-assigned device id, and it must be the same value the
+	// gateway knows the device by, otherwise central reporting cannot attribute
+	// a snapshot to a device.
+	//
+	// It is deliberately not passed to snapshot listing, stats, ping or restore.
+	// Those operations must see the whole repository: a device that upgraded
+	// from 0.1.0 has history written under the machine hostname, and filtering
+	// every read by the new device id makes that history invisible.
 	Host string
 	// Password is the repository password. It is held in memory only and handed
 	// to restic through the child process environment.
@@ -132,12 +139,29 @@ func (r *Restic) Host() string { return r.opts.Host }
 // with credentials in it, and Repository itself does not redact.
 func (r *Restic) Repository() string { return r.opts.Repository }
 
-// args builds the global flag set. Every restic invocation in this package goes
-// through it, which is what makes TestArgsNeverContainRetentionCommands
-// meaningful.
+// args builds the global flag set for operations that must see every snapshot
+// in the repository. Every restic invocation in this package goes through it,
+// which is what makes TestArgsNeverContainRetentionCommands meaningful.
+//
+// --host is intentionally absent here even when Options.Host is set. It is a
+// snapshot filter, not repository addressing: passing the device id to
+// `snapshots`, `stats`, `restore` or `ping` hides snapshots written before the
+// device id was introduced (0.1.0 wrote the machine hostname), which is exactly
+// how an upgraded device loses sight of its history.
 func (r *Restic) args(extra ...string) []string {
+	return r.baseArgs(false, extra...)
+}
+
+// backupArgs builds the flag set for a backup, where --host is a write-side
+// label. It makes new snapshots attributable to the enrolled device without
+// filtering anything.
+func (r *Restic) backupArgs(extra ...string) []string {
+	return r.baseArgs(true, extra...)
+}
+
+func (r *Restic) baseArgs(withHost bool, extra ...string) []string {
 	base := []string{"-r", r.opts.Repository}
-	if r.opts.Host != "" {
+	if withHost && r.opts.Host != "" {
 		base = append(base, "--host", r.opts.Host)
 	}
 	if r.opts.PasswordFile != "" {
@@ -420,7 +444,7 @@ func (r *Restic) Ping(ctx context.Context) error {
 
 // Backup runs a restic backup and returns the summary restic emitted.
 func (r *Restic) Backup(ctx context.Context, include, exclude []string) (*Result, error) {
-	args := r.args("--json", "backup")
+	args := r.backupArgs("--json", "backup")
 	args = append(args, normalizedPaths(include)...)
 	for _, e := range exclude {
 		if e != "" {
@@ -496,6 +520,32 @@ func parseBackupLine(line []byte, res *Result) error {
 	}
 	res.ResticDuration = time.Duration(msg.TotalDuration * float64(time.Second))
 	return nil
+}
+
+// Snapshots returns every snapshot in the repository, newest first.
+//
+// It deliberately does not pass --host: the repository is already one per
+// device and isolated at the gateway, so a host filter adds nothing except a way
+// to hide snapshots written by an older build under a different hostname.
+func (r *Restic) Snapshots(ctx context.Context) ([]Snapshot, error) {
+	sink := newStderrSink(r.log, r.opts.Repository)
+	cmd := r.newCmd(ctx, r.args("--json", "snapshots")...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = sink
+	if err := cmd.Run(); err != nil {
+		return nil, repoErr("snapshots", err, sink)
+	}
+	trimmed := strings.TrimSpace(out.String())
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	var snaps []Snapshot
+	if err := json.Unmarshal(out.Bytes(), &snaps); err != nil {
+		return nil, fmt.Errorf("restic snapshots: invalid JSON: %w", err)
+	}
+	sort.SliceStable(snaps, func(i, j int) bool { return snaps[i].Time.After(snaps[j].Time) })
+	return snaps, nil
 }
 
 // LatestSnapshot returns the most recent snapshot, or nil when the repository

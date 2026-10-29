@@ -144,6 +144,50 @@ func TestAttemptRecordsElapsedNotResticTime(t *testing.T) {
 	}
 }
 
+func TestSuccessfulAttemptMovesNextBackupTimeIntoTheFuture(t *testing.T) {
+	h := testScheduler(t, nil, nil)
+	s := h.Scheduler
+	s.run = func(ctx context.Context) (status.Outcome, error) {
+		h.clock.now = h.clock.now.Add(2 * time.Minute)
+		return status.Outcome{SnapshotID: "snap1"}, nil
+	}
+	if _, err := s.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := h.clock.now.Add(time.Hour).UTC().Format(time.RFC3339)
+	if st.NextBackupTime != want {
+		t.Errorf("next_backup_time = %q, want %q (last success plus the schedule interval)",
+			st.NextBackupTime, want)
+	}
+	if next, ok := status.ParseStamp(st.NextBackupTime); !ok || !next.After(h.clock.now) {
+		t.Errorf("next_backup_time = %q must not be in the past", st.NextBackupTime)
+	}
+}
+
+func TestFailedAttemptSetsNextBackupToTheRetryInterval(t *testing.T) {
+	h := testScheduler(t, nil, nil)
+	s := h.Scheduler
+	s.run = func(ctx context.Context) (status.Outcome, error) {
+		return status.Outcome{}, errors.New("network unreachable")
+	}
+	if _, err := s.RunOnce(context.Background()); err == nil {
+		t.Fatal("expected an error")
+	}
+	st, err := s.store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := h.clock.now.Add(5 * time.Minute).UTC().Format(time.RFC3339)
+	if st.NextBackupTime != want {
+		t.Errorf("next_backup_time = %q, want %q (the retry interval)",
+			st.NextBackupTime, want)
+	}
+}
+
 func TestFailureRecordsErrorAndDoesNotMoveLastSuccess(t *testing.T) {
 	s := testScheduler(t, nil, nil)
 	s.run = func(ctx context.Context) (status.Outcome, error) {

@@ -32,13 +32,13 @@ func testRestic(t *testing.T, mutate func(*Options)) *Restic {
 	return New(opts)
 }
 
-func TestArgsCarryHostAndNoPassword(t *testing.T) {
+func TestBackupArgsCarryHostAndNoPassword(t *testing.T) {
 	r := testRestic(t, nil)
-	args := r.args("backup")
+	args := r.backupArgs("backup")
 	joined := strings.Join(args, " ")
 
 	if !containsPair(args, "--host", "dev-01HQ8XK3M4N7") {
-		t.Errorf("--host must carry the enrollment device id, got %v", args)
+		t.Errorf("a backup must label the snapshot with the enrollment device id, got %v", args)
 	}
 	if !containsPair(args, "-r", "rest:https://backup.softafrique.net/dev-01HQ8XK3M4N7") {
 		t.Errorf("-r must carry the repository, got %v", args)
@@ -50,6 +50,24 @@ func TestArgsCarryHostAndNoPassword(t *testing.T) {
 	}
 	if strings.Contains(joined, "--password") {
 		t.Errorf("no password flag expected when PasswordFile is unset: %v", args)
+	}
+}
+
+// The host is a write-side label for new snapshots, never a read-side filter.
+// A 0.1.0 repository contains snapshots written under the machine hostname;
+// filtering snapshots, stats, ping or restore by the new device id makes those
+// recovery points invisible on every upgraded device.
+func TestRepositoryWideOperationsDoNotFilterByHost(t *testing.T) {
+	r := testRestic(t, nil)
+	operations := map[string][]string{
+		"snapshots": r.args("--json", "snapshots", "--latest", "1"),
+		"stats":     r.args("--json", "stats", "--mode", ModeRawData),
+		"restore":   r.args("restore", "latest", "--target", `C:\out`),
+	}
+	for name, args := range operations {
+		if containsPair(args, "--host", "dev-01HQ8XK3M4N7") {
+			t.Errorf("%s must not be filtered by --host; it would hide pre-upgrade history: %v", name, args)
+		}
 	}
 }
 
@@ -68,7 +86,7 @@ func TestArgsNeverContainRetentionCommands(t *testing.T) {
 	// expires anything.
 	r := testRestic(t, nil)
 	invocations := [][]string{
-		r.args("backup"),
+		r.backupArgs("backup"),
 		r.args("snapshots"),
 		r.args("--json", "snapshots", "--latest", "1"),
 		r.args("--json", "stats", "--mode", ModeRawData),

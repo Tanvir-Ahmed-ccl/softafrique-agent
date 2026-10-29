@@ -129,7 +129,7 @@ func run(args []string) int {
 		return exitOK
 	}
 	if errors.Is(err, flag.ErrHelp) {
-		return exitUsage
+		return exitOK
 	}
 	fmt.Fprintln(os.Stderr, "error:", err)
 	return exitCodeFor(err)
@@ -185,6 +185,14 @@ func openEnv(args []string, console bool, extra func(fs *flag.FlagSet) error) (*
 	verbose := fs.Bool("verbose", false, "log at debug level")
 
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// openEnv normally discards flag output so the caller can print the
+			// single error line. Help is the exception: the operator asked for it,
+			// so it has to reach the console.
+			fs.SetOutput(os.Stderr)
+			fmt.Fprintf(os.Stderr, "Usage of %s:\n", fs.Name())
+			fs.PrintDefaults()
+		}
 		return nil, err
 	}
 
@@ -697,25 +705,42 @@ func cmdSelfTest(args []string) error {
 }
 
 func cmdSnapshots(args []string) error {
-	env, err := openEnv(args, true, nil)
+	var latest bool
+	env, err := openEnv(args, true, func(fs *flag.FlagSet) error {
+		fs.BoolVar(&latest, "latest", false, "show only the latest snapshot")
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 	ctx, stop := signalCtx()
 	defer stop()
 
-	snap, err := newAgent(env).LatestSnapshot(ctx)
+	snaps, err := newAgent(env).Snapshots(ctx)
 	if err != nil {
 		return err
 	}
-	if snap == nil {
-		fmt.Println("no snapshots yet")
+	if len(snaps) == 0 {
+		fmt.Println("no snapshots found in this device's repository")
 		return nil
 	}
-	fmt.Printf("snapshot  %s\n", snap.ID)
-	fmt.Printf("  taken   %s\n", snap.Time.UTC().Format(time.RFC3339))
-	fmt.Printf("  host    %s\n", snap.Host)
-	fmt.Printf("  paths   %s\n", strings.Join(snap.Paths, ", "))
+	if latest {
+		snap := snaps[0]
+		fmt.Printf("snapshot  %s\n", snap.ID)
+		fmt.Printf("  taken   %s\n", snap.Time.UTC().Format(time.RFC3339))
+		fmt.Printf("  host    %s\n", snap.Host)
+		fmt.Printf("  paths   %s\n", strings.Join(snap.Paths, ", "))
+		_ = env
+		return nil
+	}
+
+	fmt.Printf("%d recovery points in this device's repository\n\n", len(snaps))
+	fmt.Printf("%-64s  %-20s  %s\n", "SNAPSHOT", "TAKEN (UTC)", "HOST")
+	for _, snap := range snaps {
+		fmt.Printf("%-64s  %-20s  %s\n",
+			snap.ID, snap.Time.UTC().Format(time.RFC3339), snap.Host)
+	}
+	fmt.Println("\nrestore one with: agent restore <snapshot-id> -target <folder>")
 	_ = env
 	return nil
 }
@@ -775,12 +800,88 @@ func orDash(s string) string {
 
 func defaultRestoreTarget() string {
 	if runtime.GOOS == "windows" {
-		return filepath.Join("C:", "SoftafriqueRestore")
+		// The separator matters. filepath.Join("C:", "SoftafriqueRestore") is
+		// "C:SoftafriqueRestore", a drive-relative path that Windows resolves
+		// against the working directory. For a service or an MSI-installed CLI
+		// that meant restoring into Program Files.
+		return filepath.Join(`C:\`, "SoftafriqueRestore")
 	}
 	return filepath.Join(".", "restore_output")
 }
 
+// normalizeRestoreArgs accepts the snapshot id as a positional argument, which
+// is how a technician naturally types it (`restore <id> -target <dir>`).
+//
+// Go's flag package stops at the first non-flag argument, so without this the
+// id was discarded, -target after it was never parsed, and the command silently
+// restored "latest" into the default folder. The id is moved ahead of the flags
+// so every flag is still parsed.
+func normalizeRestoreArgs(args []string) ([]string, error) {
+	valueFlags := map[string]bool{
+		"config": true, "repo": true, "password-file": true, "include": true,
+		"device-id": true, "snapshot": true, "target": true,
+	}
+	boolFlags := map[string]bool{"verbose": true}
+
+	var flags, positionals []string
+	endOfFlags := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if endOfFlags {
+			positionals = append(positionals, arg)
+			continue
+		}
+		if arg == "--" {
+			endOfFlags = true
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionals = append(positionals, arg)
+			continue
+		}
+
+		flags = append(flags, arg)
+		name := strings.TrimLeft(arg, "-")
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			continue
+		}
+		if boolFlags[name] {
+			continue
+		}
+		if valueFlags[name] && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+
+	if len(positionals) > 1 {
+		return nil, fmt.Errorf("restore takes one snapshot id, got %d: %s",
+			len(positionals), strings.Join(positionals, ", "))
+	}
+	if len(positionals) == 1 {
+		flags = append([]string{"-snapshot", positionals[0]}, flags...)
+	}
+	return flags, nil
+}
+
+func resolveRestoreTarget(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", errors.New("restore target must not be empty")
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil {
+		return "", fmt.Errorf("could not resolve the restore target %q: %w", target, err)
+	}
+	return abs, nil
+}
+
 func cmdRestore(args []string) error {
+	args, err := normalizeRestoreArgs(args)
+	if err != nil {
+		return err
+	}
+
 	var snapshot, target string
 	var includes multiFlag
 	env, err := openEnv(args, true, func(fs *flag.FlagSet) error {
@@ -800,6 +901,11 @@ func cmdRestore(args []string) error {
 		return err
 	}
 	defer l.Release()
+
+	target, err = resolveRestoreTarget(target)
+	if err != nil {
+		return err
+	}
 
 	if err := newAgent(env).Restore(ctx, snapshot, target, includes); err != nil {
 		return err
@@ -838,7 +944,7 @@ Running:
 Operations:
   backup      Run one backup now and report what happened.
   selftest    Check the repository, the key and the gateway.
-  snapshots   Show the latest snapshot.
+  snapshots   List every recovery point (or -latest for just the newest).
   status      Print status.json, or -short for one monitoring line.
   restore     Restore a snapshot into a folder.
   render-config  Write config.yaml from the installer template (used by the MSI).
@@ -856,9 +962,13 @@ enroll flags:
   -token-file <path>    Read the token from a file.
 
 restore flags:
+  <id|latest>           Snapshot to restore, as the first argument or -snapshot
   -snapshot <id|latest> Snapshot to restore (default latest)
-  -target <dir>         Destination folder
+  -target <dir>         Destination folder (an absolute path)
   -include <pattern>    Restrict the restore to matching paths (repeatable)
+
+snapshots flags:
+  -latest               Show only the newest snapshot.
 
 Exit codes:
   0 ok   1 error   2 bad usage   3 not enrolled   4 action required   5 unhealthy

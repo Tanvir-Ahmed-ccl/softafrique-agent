@@ -198,6 +198,75 @@ func TestCheckTokenFileProtection(t *testing.T) {
 	}
 }
 
+// `restore <id> -target <dir>` is the natural command line, but Go's flag
+// package stops at the first positional argument. The id and every flag after
+// it used to be ignored, so restore silently acted on "latest" instead.
+func TestNormalizeRestoreArgsMovesSnapshotAheadOfFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "snapshot before flags",
+			in:   []string{"92b899f0", "-target", `C:\Temp\restoretest`},
+			want: []string{"-snapshot", "92b899f0", "-target", `C:\Temp\restoretest`},
+		},
+		{
+			name: "snapshot between flags",
+			in:   []string{"-target", `C:\Temp\restoretest`, "92b899f0", "-include", "*.docx"},
+			want: []string{"-snapshot", "92b899f0", "-target", `C:\Temp\restoretest`, "-include", "*.docx"},
+		},
+		{
+			name: "flag value is not mistaken for a snapshot",
+			in:   []string{"-target", `C:\Temp\restoretest`},
+			want: []string{"-target", `C:\Temp\restoretest`},
+		},
+		{
+			name: "equals form keeps its value",
+			in:   []string{"-target=C:\\Temp\\restoretest", "92b899f0"},
+			want: []string{"-snapshot", "92b899f0", "-target=C:\\Temp\\restoretest"},
+		},
+		{
+			name: "double dash ends flag parsing",
+			in:   []string{"-target", `C:\Temp\restoretest`, "--", "92b899f0"},
+			want: []string{"-snapshot", "92b899f0", "-target", `C:\Temp\restoretest`},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizeRestoreArgs(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, "\x00") != strings.Join(tc.want, "\x00") {
+				t.Errorf("normalizeRestoreArgs(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeRestoreArgsRefusesTwoSnapshots(t *testing.T) {
+	if _, err := normalizeRestoreArgs([]string{"92b899f0", "deadbeef"}); err == nil {
+		t.Fatal("two positional snapshot ids must be refused, not silently one of them")
+	}
+}
+
+// The default restore target must be an absolute path. "C:SoftafriqueRestore"
+// is drive-relative and resolves against the process working directory, which
+// put restored customer data under Program Files.
+func TestDefaultRestoreTargetIsAbsolute(t *testing.T) {
+	got := defaultRestoreTarget()
+	if runtime.GOOS == "windows" {
+		if !filepath.IsAbs(got) {
+			t.Errorf("default restore target %q is not absolute", got)
+		}
+		if strings.HasPrefix(got, `C:`) && !strings.HasPrefix(got, `C:\`) {
+			t.Errorf("default restore target %q is drive-relative", got)
+		}
+	}
+}
+
 // A missing file is a mistake in the command, not a permissions problem.
 func TestCheckTokenFileProtectionMissing(t *testing.T) {
 	if err := checkTokenFileProtection(filepath.Join(t.TempDir(), "nope.txt")); err == nil {

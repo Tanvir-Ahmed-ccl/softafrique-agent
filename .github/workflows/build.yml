@@ -229,8 +229,10 @@ jobs:
         # an empty Files table -- hence the size assertion below.
         run: |
           set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
           wix build installer/Product.wxs -arch x64 \
             -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
+            -d ProductVersion="${VERSION}" \
             -bindpath "bin=${GITHUB_WORKSPACE}/build/bin" \
             -bindpath "res=${GITHUB_WORKSPACE}/installer" \
             -o SoftafriqueBackupAgent.msi

@@ -196,8 +196,29 @@ func (s *Scheduler) attempt(ctx context.Context) (status.Outcome, error) {
 		outcome.Err = err
 	}
 
-	_ = s.store.Update(func(st *status.Status) { st.MarkFinished(end, outcome) })
+	_ = s.store.Update(func(st *status.Status) {
+		st.MarkFinished(end, outcome)
+		// next_backup_time is part of the status contract, and leaving it untouched
+		// meant it stayed frozen at whatever the previous version wrote, in the
+		// past, even after a successful run. A dashboard keying off it then shows
+		// a healthy device as overdue.
+		st.SetNextBackup(s.nextBackupTime(end, outcome))
+	})
 	return outcome, err
+}
+
+// nextBackupTime is when the loop intends to run next, matching the same rules
+// waitUntilDue applies: a successful run waits for the schedule interval, while
+// a failure, a skipped run or a recreated empty folder is retried sooner.
+func (s *Scheduler) nextBackupTime(end time.Time, outcome status.Outcome) time.Time {
+	interval := s.cfg.ScheduleInterval
+	if outcome.Err != nil || outcome.Skipped || len(outcome.RecreatedPaths) > 0 {
+		interval = s.cfg.RetryInterval
+	}
+	if interval <= 0 {
+		return time.Time{}
+	}
+	return end.Add(interval)
 }
 
 // randomUpTo returns a random duration in [0, d).

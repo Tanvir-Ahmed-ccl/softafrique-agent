@@ -72,8 +72,13 @@ Work down this list; each step is cheap and rules something out.
 
 ```powershell
 $env:RESTIC_PASSWORD = (read the key from the dashboard; do not echo it)
-& "C:\Program Files\Softafrique Backup Agent\restic.exe" snapshots --host <device_id>
+& "C:\Program Files\Softafrique Backup Agent\restic.exe" snapshots
 ```
+
+Do not add `--host`: it filters the list, and snapshots written before the
+device-id host was introduced carry the machine hostname instead. The agent's
+own `snapshots` command intentionally lists the whole repository for the same
+reason.
 
 ### "Backups stopped when the gateway went down"
 
