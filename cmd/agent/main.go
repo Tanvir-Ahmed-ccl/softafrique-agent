@@ -564,7 +564,16 @@ func cmdRun(args []string, asService bool) error {
 		defer l.Release()
 		env.log.Info("single-instance lock acquired", "lock", l.Describe())
 		env.log.Info("starting the backup loop", "version", Version, "mode", modeName(asService))
-		return a.RunScheduled(ctx)
+
+		err = a.RunScheduled(ctx)
+		if asService && isNotEnrolled(err) {
+			// The MSI starts the service even when no token was supplied, so it
+			// must stop cleanly rather than fail StartServices with error 1920.
+			// install.ps1 enrols and starts it again; a reboot will also retry.
+			env.log.Info("service has no credentials yet; stopping cleanly until enrollment")
+			return nil
+		}
+		return err
 	}
 
 	if asService {
@@ -577,6 +586,10 @@ func cmdRun(args []string, asService bool) error {
 	}
 	env.log.Info("backup loop stopped")
 	return nil
+}
+
+func isNotEnrolled(err error) bool {
+	return errors.Is(err, agent.ErrNotEnrolled) || errors.Is(err, secret.ErrNotFound)
 }
 
 func modeName(asService bool) string {

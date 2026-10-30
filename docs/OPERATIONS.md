@@ -11,7 +11,7 @@ Everything an on-call engineer or a support technician needs. Written for the
 | `C:\ProgramData\SoftafriqueBackupAgent\` | `config.yaml`, `status.json`, `agent.log`, `credentials.dat`, `remote.json` |
 | `HKLM\SOFTWARE\Softafrique\BackupAgent` | InstallDir, DataDir |
 | Service | `SoftafriqueBackupAgent`, auto + delayed, running as LocalSystem |
-| Starts at | Install, by `StartServices`. A token-file install is enrolled before that runs. The RMM script enrols after the MSI and starts it again if it exited because there were no credentials yet. |
+| Starts at | Install, by `StartServices`. A token-file install is enrolled before that runs. The RMM script enrols after the MSI and starts it again if it stopped cleanly because there were no credentials yet. A no-token install must not fail `StartServices`. |
 
 `credentials.dat` is the only file with anything sensitive in it, and it is
 DPAPI-sealed in machine scope. Sealing is not the protection: anything running as

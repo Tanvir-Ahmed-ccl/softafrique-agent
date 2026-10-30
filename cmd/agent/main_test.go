@@ -157,6 +157,26 @@ func TestExitCodesAreDistinct(t *testing.T) {
 	}
 }
 
+// StartServices starts the service even for a no-token install. That must be a
+// clean stop, not a failed service start that makes the MSI return 1603.
+func TestNotEnrolledServiceStopIsClean(t *testing.T) {
+	for _, err := range []error{
+		agent.ErrNotEnrolled,
+		fmt.Errorf("preparing agent: %w", agent.ErrNotEnrolled),
+	} {
+		if !isNotEnrolled(err) {
+			t.Errorf("%v should be recognised as not enrolled", err)
+		}
+	}
+	boom := errors.New("boom")
+	if isNotEnrolled(boom) {
+		t.Error("a real failure must not be treated as a clean no-token stop")
+	}
+	if isNotEnrolled(nil) {
+		t.Error("nil is not a not-enrolled condition")
+	}
+}
+
 // A device that has never had a successful backup must not be reported as
 // healthy, and one that has not backed up in two intervals should not either.
 func TestShortStatusIsOneLineAndHasNoSecrets(t *testing.T) {

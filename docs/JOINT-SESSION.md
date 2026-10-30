@@ -168,10 +168,10 @@ reason `recreated` is a distinct state at all.
 The parts that only mean anything as LocalSystem on a domain-joined machine.
 
 1. After install, `StartServices` starts the service. When no token was supplied
-   it has no credentials yet, exits as "not enrolled", and the SCM's configured
-   failure actions stop retrying; it must not restart forever. When a token was
-   supplied it must be running. `install.ps1` stops it before enrolling on the
-   RMM path and starts it again afterwards.
+   it has no credentials yet, reports the condition and stops cleanly; it must
+   not be a failed service start, and it must not restart in a loop. When a token
+   was supplied it must be running. `install.ps1` stops it before enrolling on
+   the RMM path and starts it again afterwards.
 
    ```powershell
    Get-Service SoftafriqueBackupAgent
