@@ -168,10 +168,10 @@ reason `recreated` is a distinct state at all.
 The parts that only mean anything as LocalSystem on a domain-joined machine.
 
 1. After install, `StartServices` starts the service. When no token was supplied
-   it has no credentials yet, reports the condition and stops cleanly; it must
-   not be a failed service start, and it must not restart in a loop. When a token
-   was supplied it must be running. `install.ps1` stops it before enrolling on
-   the RMM path and starts it again afterwards.
+   it has no credentials yet, so it stays running and waits for enrollment. That
+   is deliberate: exiting during `StartServices` makes the MSI fail with error
+   1920. When a token was supplied it must already be protecting. `install.ps1`
+   stops it before enrolling on the RMM path and starts it again afterwards.
 
    ```powershell
    Get-Service SoftafriqueBackupAgent

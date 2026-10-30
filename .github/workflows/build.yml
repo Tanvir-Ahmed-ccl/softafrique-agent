@@ -303,13 +303,13 @@ jobs:
             '/i', 'SoftafriqueBackupAgent.msi', '/qn', 'TESTINSTALL=1', '/l*v', 'msi.log'
           )
           if ($p.ExitCode -ne 0) { throw "install exited $($p.ExitCode)" }
-          start-sleep -Seconds 3
+          start-sleep -Seconds 5
           $svc = Get-Service -Name SoftafriqueBackupAgent -ErrorAction SilentlyContinue
           if (-not $svc) { throw "the service was not registered by the MSI" }
           # StartServices runs even with no enrollment token. The service must
-          # report that condition and stop cleanly, not fail the install with
-          # error 1920 or sit in a restart loop.
-          if ($svc.Status -ne 'Stopped') { throw "the no-token service is $($svc.Status), expected a clean stop" }
+          # stay up and wait for enrollment, not fail the install with error
+          # 1920 or sit in a restart loop.
+          if ($svc.Status -ne 'Running') { throw "the no-token service is $($svc.Status), expected Running while it waits for enrollment" }
           if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe")) { throw "agent not installed" }
           if (-not (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\validatepath.exe")) { throw "validatepath not installed" }
           $data = "$env:ProgramData\SoftafriqueBackupAgent"

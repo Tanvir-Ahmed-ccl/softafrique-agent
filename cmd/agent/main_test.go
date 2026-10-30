@@ -157,9 +157,9 @@ func TestExitCodesAreDistinct(t *testing.T) {
 	}
 }
 
-// StartServices starts the service even for a no-token install. That must be a
-// clean stop, not a failed service start that makes the MSI return 1603.
-func TestNotEnrolledServiceStopIsClean(t *testing.T) {
+// StartServices starts the service even for a no-token install, so the service
+// must recognise "not enrolled" and keep waiting rather than fail the MSI.
+func TestNotEnrolledIsRecognised(t *testing.T) {
 	for _, err := range []error{
 		agent.ErrNotEnrolled,
 		fmt.Errorf("preparing agent: %w", agent.ErrNotEnrolled),
@@ -170,7 +170,7 @@ func TestNotEnrolledServiceStopIsClean(t *testing.T) {
 	}
 	boom := errors.New("boom")
 	if isNotEnrolled(boom) {
-		t.Error("a real failure must not be treated as a clean no-token stop")
+		t.Error("a real failure must not be treated as the no-token waiting state")
 	}
 	if isNotEnrolled(nil) {
 		t.Error("nil is not a not-enrolled condition")
