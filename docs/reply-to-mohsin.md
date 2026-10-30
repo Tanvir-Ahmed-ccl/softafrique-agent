@@ -583,11 +583,13 @@ backup; `consecutive_failures` unchanged.
 ### Part 4 — service, identity, ACLs, secret leaks
 
 ```powershell
-Get-Service SoftafriqueBackupAgent          # stopped and not enrolled with no token; running when one was
+Get-Service SoftafriqueBackupAgent          # running when a token was supplied; no-token installs exit as not enrolled
 Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw
 
 icacls "$env:ProgramData\SoftafriqueBackupAgent"
 # SYSTEM + Administrators full control, NO Users read, inheritance disabled
+icacls "$env:ProgramData\SoftafriqueBackupAgent\credentials.dat"
+# after an upgrade this must be SYSTEM + Administrators too, not an old inherited Users ACE
 
 Select-String -Path "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Pattern 'rest:'
 Get-Content "$env:ProgramData\SoftafriqueBackupAgent\agent.log" -Tail 100 | Select-String 'password|key'

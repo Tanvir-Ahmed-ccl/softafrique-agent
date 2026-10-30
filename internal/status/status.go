@@ -65,7 +65,8 @@ type RepoStats struct {
 	// RestoreBytes is the logical size of the data as restored
 	// (restic stats --mode restore-size).
 	RestoreBytes uint64 `json:"restore_bytes"`
-	// FileCount and SnapshotCount come from the same calls.
+	// FileCount is the number of protected files, from the restore-size
+	// reading. SnapshotCount comes from the raw-data reading.
 	FileCount     uint64 `json:"file_count"`
 	SnapshotCount uint64 `json:"snapshot_count"`
 	// CapturedAt is when these numbers were read, so a dashboard can tell a

@@ -66,8 +66,9 @@ escrow is controlled and audited rather than handed to the installer.
 ## 5. What we can see, and what the customer can
 
 **We can see**, per device: whether it is enrolled, whether the service is
-running, when it last completed a backup, how long that took, how many snapshots
-exist, how much space they use, and any error the agent hit. That is what the RMM
+running, when it last completed a backup, how long that took, how many files are
+protected, how many snapshots exist, how much space they use, and any error the
+agent hit. That is what the RMM
 dashboard shows, and it is what our support uses to answer "is this machine
 actually protected" without asking the customer.
 

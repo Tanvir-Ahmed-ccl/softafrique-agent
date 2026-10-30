@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.22" ?>
+<?define ProductVersion="0.2.23" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -100,13 +100,17 @@
                               ResetPeriodInDays="1" />
         </ServiceInstall>
 
-        <!-- Start is deliberately not set. InstallServices would start the
-             service before the RMM script has enrolled the device, and the first
-             scheduled run would then fail with "not enrolled". The RMM script
-             starts the service itself once enrollment has succeeded, and the
-             token-file path starts it from the InstallExecuteSequence below. -->
+        <!-- Start=install is deliberate. Without it InstallServices/StartServices
+             have nothing to start, so a fresh deployment leaves the service
+             installed, AUTO_START and stopped until a reboot or a technician
+             notices. The token-file install enrols in the execute sequence
+             before StartServices runs, so the service starts with credentials.
+             The RMM path enrols after the MSI and then starts the service
+             itself; a service that starts before that exits as "not enrolled"
+             and is started again by install.ps1 once enrollment has succeeded. -->
         <ServiceControl Id="AgentServiceControl"
                         Name="SoftafriqueBackupAgent"
+                        Start="install"
                         Stop="both"
                         Remove="uninstall"
                         Wait="yes" />
@@ -308,6 +312,19 @@
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; unenroll -yes -force -config &quot;[DATAFOLDER]config.yaml&quot;"
                  Before="RemoveCredentials" Sequence="execute" />
 
+    <!-- The directory security descriptor above is not retroactive. Files that
+         were created by an older version keep the ACE they inherited then, even
+         after the parent DACL is replaced, which is how credentials.dat stayed
+         readable by BUILTIN\Users on every upgraded machine. Reset the children
+         to inherit the new protected DACL. /C keeps one locked file from
+         stopping the rest; /T covers restic-cache. [System64Folder] avoids the
+         SysWOW64 path and [DATAFOLDER] already ends in a backslash, so both
+         quoting failures that made an earlier icacls action return 1603 are
+         absent. -->
+    <SetProperty Id="ResetDataDirAcl"
+                 Value="&quot;[System64Folder]icacls.exe&quot; &quot;[DATAFOLDER]*&quot; /reset /T /C /Q"
+                 Before="ResetDataDirAcl" Sequence="execute" />
+
     <SetProperty Id="WriteConfig"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]&quot;"
                  Before="WriteConfig" Sequence="execute" />
@@ -317,8 +334,6 @@
     <SetProperty Id="EnrollDevice"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; enroll -token-file &quot;[ENROLLTOKENFILE]&quot; -config &quot;[DATAFOLDER]config.yaml&quot;"
                  Before="EnrollDevice" Sequence="execute" />
-    <SetProperty Id="StartEnrolledService" Value="&quot;[SystemFolder]sc.exe&quot; start &quot;SoftafriqueBackupAgent&quot;"
-                 Before="StartEnrolledService" Sequence="execute" />
 
     <!-- ================= custom actions ================= -->
     <!--
@@ -329,10 +344,11 @@
       and an uninstall that quietly failed to delete the key would leave the
       credentials this release exists to remove.
 
-      The data-directory ACL is deliberately not a custom action: the MSI 5
+      The data-directory DACL itself is not a custom action: the MSI 5
       PermissionEx element above applies it through MsiLockPermissionsEx, so
       there is no shell, no trailing-backslash quoting and no CA failure that
-      can abort a clean install.
+      can abort a clean install. ResetDataDirAcl only re-propagates that DACL to
+      files that already existed; it never builds an ACL of its own.
 
       Deferred is not a stylistic choice. Enrollment seals the repository
       credentials with DPAPI, which is per-user, and the service runs as
@@ -360,6 +376,13 @@
                   Return="check"
                   Impersonate="no" />
 
+    <CustomAction Id="ResetDataDirAcl"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
     <CustomAction Id="WriteConfig"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
@@ -381,16 +404,6 @@
                   Return="check"
                   Impersonate="no" />
 
-    <!-- Only the token-file path starts the service here. The RMM script starts
-         it itself after enrolling, and a hand-typed install with no token
-         deliberately leaves it stopped for an operator to enroll first. -->
-    <CustomAction Id="StartEnrolledService"
-                  BinaryRef="Wix4UtilCA_X64"
-                  DllEntry="WixQuietExec64"
-                  Execute="deferred"
-                  Return="ignore"
-                  Impersonate="no" />
-
     <InstallExecuteSequence>
       <!-- Remove the key after the service has stopped and before RemoveFiles
            deletes the executable this action runs. A major upgrade sets
@@ -406,17 +419,19 @@
            applied by CreateFolders/InstallFiles before this action. -->
       <Custom Action="WriteConfig" After="InstallFiles" Condition="NOT REMOVE" />
 
-      <Custom Action="ValidateBackupFolder" After="WriteConfig"
+      <!-- Reset existing children after the parent DACL has been applied and
+           after config.yaml has been written, so a file created by an earlier
+           version cannot keep the ACE it inherited then. -->
+      <Custom Action="ResetDataDirAcl" After="WriteConfig" Condition="NOT REMOVE" />
+
+      <Custom Action="ValidateBackupFolder" After="ResetDataDirAcl"
               Condition="NOT TESTINSTALL AND NOT REMOVE" />
 
       <!-- Enrollment happens after the service exists and the data directory is
-           locked down, and before the service starts, so the very first
-           scheduled run already has credentials. InstallServices is skipped on
-           this path because the service was never started. -->
+           locked down, and before StartServices runs, so the very first
+           scheduled run already has credentials. install.ps1 does not pass a
+           token file: it enrols after the MSI and then starts the service. -->
       <Custom Action="EnrollDevice" After="ValidateBackupFolder"
-              Condition="NOT TESTINSTALL AND NOT REMOVE AND ENROLLTOKENFILE" />
-
-      <Custom Action="StartEnrolledService" After="StartServices"
               Condition="NOT TESTINSTALL AND NOT REMOVE AND ENROLLTOKENFILE" />
     </InstallExecuteSequence>
 

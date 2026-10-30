@@ -11,13 +11,15 @@ Everything an on-call engineer or a support technician needs. Written for the
 | `C:\ProgramData\SoftafriqueBackupAgent\` | `config.yaml`, `status.json`, `agent.log`, `credentials.dat`, `remote.json` |
 | `HKLM\SOFTWARE\Softafrique\BackupAgent` | InstallDir, DataDir |
 | Service | `SoftafriqueBackupAgent`, auto + delayed, running as LocalSystem |
-| Starts at | Install when `ENROLLTOKENFILE` is set; otherwise the RMM script starts it after enrollment |
+| Starts at | Install, by `StartServices`. A token-file install is enrolled before that runs. The RMM script enrols after the MSI and starts it again if it exited because there were no credentials yet. |
 
 `credentials.dat` is the only file with anything sensitive in it, and it is
 DPAPI-sealed in machine scope. Sealing is not the protection: anything running as
 SYSTEM or an administrator can decrypt a machine-scope blob, so the directory ACL
 is the boundary. The package grants full control to SYSTEM and Administrators,
-inheritable, with inheritance switched off, and nothing else.
+inheritable, with inheritance switched off, and nothing else. On an upgrade it
+also resets existing children to inherit that DACL, because Windows does not
+retroactively re-propagate a changed parent ACL to files that already exist.
 
 The practical consequence is that reading `status.json` needs elevation. The
 Tactical RMM health check runs as SYSTEM and is unaffected. A third-party

@@ -93,9 +93,11 @@ papered over with a new empty one.
 and a hand-run `agent backup` go through the scheduler's attempt bookkeeping, so
 a backup started by hand lands in `status.json` exactly like a scheduled one.
 
-**One agent at a time.** A named mutex (`Global\SoftafriqueBackupAgent.
+**One writer at a time.** A named mutex (`Global\SoftafriqueBackupAgent.
 SingleInstance`) keeps a hand-run `agent backup` from racing the service onto the
-same repository under the same `--host`.
+same repository under the same `--host`. Read-only commands (`restore`,
+`snapshots`, `status`, `selftest`) do not take it, so a technician can restore
+during an incident without stopping the customer's backup service.
 
 ## Layout
 
@@ -124,7 +126,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.22   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.23   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so

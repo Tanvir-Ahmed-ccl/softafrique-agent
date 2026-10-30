@@ -185,12 +185,25 @@ if ($AllowUNC) {
     }
 }
 
-# The service is installed but not started yet, so a scheduled run cannot race
-# enrollment. Start it after the device has credentials.
+# The MSI now starts the service at StartServices, because a deployment that
+# bypasses this script must not sit unprotected until somebody notices. On the
+# RMM path there are no credentials yet, so the service exits as "not enrolled".
+# Stop it before enrollment so there is no race between enrollment writing the
+# blob and the service starting or stopping. Start it again below, after the
+# device has credentials.
 $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 if (-not $svc) { Write-Fail "the $ServiceName service was not registered by the MSI" }
 if ($svc.StartType -ne 'Automatic') { Write-Fail "the service start type is $($svc.StartType), expected Automatic" }
 Write-Step 'service registered and set to start automatically'
+if ($svc.Status -ne 'Stopped') {
+    Write-Step 'stopping the service before enrollment; it was started by the MSI without credentials'
+    Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+    try {
+        $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
+    } catch {
+        Write-Fail "the service did not stop before enrollment (status $($svc.Status))"
+    }
+}
 
 # ---- enrollment -------------------------------------------------------------
 # The token goes into this process's environment, and the agent reads it from

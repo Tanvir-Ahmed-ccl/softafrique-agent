@@ -167,16 +167,18 @@ reason `recreated` is a distinct state at all.
 
 The parts that only mean anything as LocalSystem on a domain-joined machine.
 
-1. After install, the service must be **stopped and not enrolled** when no token
-   was supplied, and running when one was:
+1. After install, `StartServices` starts the service. When no token was supplied
+   it has no credentials yet, exits as "not enrolled", and the SCM's configured
+   failure actions stop retrying; it must not restart forever. When a token was
+   supplied it must be running. `install.ps1` stops it before enrolling on the
+   RMM path and starts it again afterwards.
 
    ```powershell
    Get-Service SoftafriqueBackupAgent
    Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw
    ```
 
-   A fresh install with no token must not be in a crash-restart loop. Check the
-   Windows event log for service start failures.
+   Check the Windows event log for the reason if it is not running.
 
 2. The data directory ACL is the real control on the key — DPAPI stops other
    *users*, not anything running as SYSTEM or an administrator:
@@ -190,6 +192,15 @@ The parts that only mean anything as LocalSystem on a domain-joined machine.
    There must be **no `Users` read ACE**: an earlier package granted one and it did
    not work, because a non-inheritable directory ACE does not reach the files
    inside. Verify both the inherited ACE and any `Users` entry are genuinely gone.
+
+   After an **upgrade**, check the existing files too, not just the directory:
+
+   ```powershell
+   icacls "$env:ProgramData\SoftafriqueBackupAgent\credentials.dat"
+   ```
+
+   It must be SYSTEM and Administrators. The directory DACL alone does not
+   retroactively re-propagate to a file written by an earlier version.
 
 3. Confirm the key is not anywhere it should not be, after a real run:
 

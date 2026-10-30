@@ -1,10 +1,13 @@
-// Package lock prevents two agent instances from running at once.
+// Package lock prevents two write-side agent instances from running at once.
 //
 // This matters because an operator (or a monitoring script) can start a
 // one-shot `agent backup` while the Windows service is already looping. Two
 // restic processes would then write snapshots to the same repository under the
 // same --host, and both would race on status.json. restic's own repository lock
 // only serialises them; it does not stop the double schedule.
+//
+// Read-only commands such as restore deliberately do not take this lock: they
+// must be usable during an incident without stopping the customer's service.
 package lock
 
 import "errors"

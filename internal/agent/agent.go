@@ -755,14 +755,17 @@ func (a *Agent) RefreshStats(ctx context.Context) {
 	if err != nil {
 		a.log.Debug("restore size unavailable", "err", err)
 	}
+	// raw-data reports bytes and snapshot count but not a file count, so taking
+	// file_count from it always wrote 0. restore-size reports the protected-file
+	// total the dashboard needs.
 	entry := &status.RepoStats{
 		RepoBytes:     raw.TotalSize,
-		FileCount:     raw.TotalFileCount,
 		SnapshotCount: raw.SnapshotsCount,
 		CapturedAt:    status.Now(),
 	}
 	if restore != nil {
 		entry.RestoreBytes = restore.TotalSize
+		entry.FileCount = restore.TotalFileCount
 	}
 	_ = a.store.Update(func(st *status.Status) { st.RepoStats = entry })
 }

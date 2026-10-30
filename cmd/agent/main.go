@@ -292,11 +292,12 @@ func newAgent(env *runtimeEnv) *agent.Agent {
 	return a
 }
 
-// acquireLock takes the single-instance lock.
+// acquireLock takes the single-instance lock for write-side commands.
 //
 // A second `agent run` or a scheduled `agent backup` while the service is
 // already looping would put two restic processes on the same repository under
-// the same --host, and both would rewrite status.json.
+// the same --host, and both would rewrite status.json. Read-only commands
+// (restore, snapshots, status, selftest) deliberately do not take it.
 func acquireLock() (lock.Lock, error) {
 	l, err := lock.Acquire()
 	if err != nil {
@@ -907,12 +908,11 @@ func cmdRestore(args []string) error {
 	ctx, stop := signalCtx()
 	defer stop()
 
-	l, err := acquireLock()
-	if err != nil {
-		return err
-	}
-	defer l.Release()
-
+	// Restore is read-only: it does not write to the repository and restic does
+	// not need an exclusive lock for it. Taking the single-instance guard here
+	// meant a technician had to stop the customer's backup service during an
+	// incident, leaving the machine unprotected exactly when something had
+	// already gone wrong.
 	target, err = resolveRestoreTarget(target)
 	if err != nil {
 		return err

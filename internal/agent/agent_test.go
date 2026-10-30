@@ -47,12 +47,13 @@ func (f *fakeGateway) Health(context.Context) error { return f.healthErr }
 
 // fakeRestic records what it was asked to do.
 type fakeRestic struct {
-	backups    int
-	include    []string
-	result     *restic.Result
-	err        error
-	pingErr    error
-	statsCalls int
+	backups     int
+	include     []string
+	result      *restic.Result
+	err         error
+	pingErr     error
+	statsCalls  int
+	statsByMode map[string]*restic.Stats
 }
 
 func (f *fakeRestic) Ping(context.Context) error { return f.pingErr }
@@ -69,8 +70,11 @@ func (f *fakeRestic) Backup(_ context.Context, include, _ []string) (*restic.Res
 	return f.result, nil
 }
 
-func (f *fakeRestic) Stats(context.Context, string) (*restic.Stats, error) {
+func (f *fakeRestic) Stats(_ context.Context, mode string) (*restic.Stats, error) {
 	f.statsCalls++
+	if s := f.statsByMode[mode]; s != nil {
+		return s, nil
+	}
 	return &restic.Stats{TotalSize: 1024, SnapshotsCount: 3}, nil
 }
 
@@ -270,12 +274,18 @@ func TestSuccessfulBackupIsReported(t *testing.T) {
 		Status:     api.StateActive,
 		BackupPath: customerDataDir(t),
 	}}
-	rest := &fakeRestic{result: &restic.Result{
-		SnapshotID:   "abcdef123456",
-		FilesAdded:   10,
-		FilesChanged: 2,
-		BytesAdded:   4096,
-	}}
+	rest := &fakeRestic{
+		result: &restic.Result{
+			SnapshotID:   "abcdef123456",
+			FilesAdded:   10,
+			FilesChanged: 2,
+			BytesAdded:   4096,
+		},
+		statsByMode: map[string]*restic.Stats{
+			restic.ModeRawData:     {TotalSize: 4096, SnapshotsCount: 50},
+			restic.ModeRestoreSize: {TotalSize: 1797106, TotalFileCount: 4},
+		},
+	}
 	a := newTestAgent(t, gw, rest)
 	enrollTest(t, a)
 
@@ -320,8 +330,17 @@ func TestSuccessfulBackupIsReported(t *testing.T) {
 	if st.RepoStats == nil {
 		t.Fatal("a successful backup left repo_stats empty")
 	}
-	if st.RepoStats.SnapshotCount != 3 {
-		t.Errorf("snapshot_count = %d, want the fresh reading 3", st.RepoStats.SnapshotCount)
+	if st.RepoStats.SnapshotCount != 50 {
+		t.Errorf("snapshot_count = %d, want the raw-data reading 50", st.RepoStats.SnapshotCount)
+	}
+	if st.RepoStats.FileCount != 4 {
+		t.Errorf("file_count = %d, want the restore-size reading 4", st.RepoStats.FileCount)
+	}
+	if st.RepoStats.RepoBytes != 4096 {
+		t.Errorf("repo_bytes = %d, want the raw-data reading 4096", st.RepoStats.RepoBytes)
+	}
+	if st.RepoStats.RestoreBytes != 1797106 {
+		t.Errorf("restore_bytes = %d, want the restore-size reading 1797106", st.RepoStats.RestoreBytes)
 	}
 	if st.RepoStats.CapturedAt == "" {
 		t.Error("repo_stats has no captured_at")

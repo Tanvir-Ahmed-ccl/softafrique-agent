@@ -376,8 +376,10 @@ jobs:
       # because it was not tested. So install again for real.
       #
       # No TESTINSTALL and no ENROLLTOKENFILE: the folder check and the full
-      # layout run, and the service is installed but neither started nor
-      # enrolled, because both are gated on a token file. No gateway needed.
+      # layout run. The service is installed and StartServices starts it, but it
+      # exits immediately because there are no credentials yet; no gateway is
+      # needed. This is the same state install.ps1 sees before it enrols, and it
+      # starts the service again afterwards.
       - name: install for real and accept a missing backup folder
         shell: pwsh
         run: |
