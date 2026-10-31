@@ -3,25 +3,28 @@
     Removes the Softafrique Backup Agent from this machine.
 
 .DESCRIPTION
-    Removes the service, the program files and the sealed credentials, and
-    leaves config.yaml, status.json and the log in place for diagnostics.
+    Removes the service, the program files, the sealed credentials and the
+    agent's local state: config.yaml, status.json, remote.json, the log and
+    restic's cache. The last state is written to this job's output for the
+    ticket before the files go.
 
-    Deleting credentials.dat is the default because an uninstalled agent must
-    not leave a usable repository key on a decommissioned or reimaged machine.
-    The repository and every snapshot stay on the server; a restore now needs
-    the escrowed key from the dashboard. Uninstalling does not suspend the
-    device at the gateway, so suspend it separately if the machine is finished.
+    Deleting credentials.dat is mandatory because an uninstalled agent must not
+    leave a usable repository key on a decommissioned or reimaged machine. The
+    repository and every snapshot stay on the server; a restore now needs the
+    escrowed key from the dashboard. Uninstalling does not suspend the device at
+    the gateway, so suspend it separately if the machine is finished.
 
     The MSI performs the same cleanup on a standalone uninstall. This script
     repeats it only as a fallback for an interrupted or older package.
 
 .PARAMETER PurgeCredentials
-    Also delete the whole data directory, including config.yaml, status.json,
-    the log and restic's cache. Without this switch those diagnostic files are
-    kept. The encryption key is deleted either way.
+    Deprecated compatibility switch. The whole data directory is now removed by
+    default, because leaving it behind made an uninstalled machine still look
+    managed. Use -KeepStatus first if the status file is needed for a ticket.
 
 .PARAMETER KeepStatus
-    Keep status.json. Useful when capturing it for a ticket before removal.
+    Copy status.json to %TEMP% before the data directory is removed. Useful when
+    capturing it for a ticket; the original still goes with the rest of the state.
 
 .PARAMETER MsiProductCode
     Installed product code to hand to msiexec /x, overriding the registry
@@ -32,7 +35,7 @@
 
 .EXAMPLE
     .\uninstall.ps1
-    .\uninstall.ps1 -PurgeCredentials
+    .\uninstall.ps1 -KeepStatus
 #>
 [CmdletBinding()]
 param(
@@ -143,9 +146,9 @@ if ($MsiProductCode) {
     Write-Step 'no MSI package registered; nothing for msiexec to remove'
 }
 
-# The MSI removes its own files. The data directory survives, but the sealed
-# credentials must not: the MSI's own uninstall action already deletes them, and
-# this is the fallback for an interrupted uninstall or an older package.
+# The MSI removes its own files and, on a current package, the local state too.
+# These removals are the fallback for an interrupted uninstall or an older
+# package that only deleted the credentials.
 $credentials = Join-Path $DataDir 'credentials.dat'
 if (Test-Path $credentials) {
     Remove-Item $credentials -Force -ErrorAction SilentlyContinue
@@ -159,22 +162,19 @@ if (Test-Path $credentials) {
 }
 
 if ($PurgeCredentials) {
-    if (Test-Path $DataDir) {
-        Write-Step "deleting $DataDir, including config, status and the restic cache"
-        Remove-Item $DataDir -Recurse -Force -ErrorAction SilentlyContinue
-        if (Test-Path $DataDir) {
-            Write-Output "[uninstall] FAILED: could not delete $DataDir. Delete it by hand."
-            exit 1
-        }
-        Write-Step 'data directory removed'
-    } else {
-        Write-Step 'no data directory to purge'
-    }
-} else {
-    if (Test-Path $DataDir) {
-        Write-Step "kept $DataDir without credentials, for diagnostics. Snapshots on the server are untouched either way."
-        Write-Step 'the device is still enrolled at the gateway; suspend it from the dashboard if it is decommissioned.'
-    }
+    Write-Step '-PurgeCredentials is the default now; the data directory will be removed'
 }
+if (Test-Path $DataDir) {
+    Write-Step "deleting $DataDir, including config, status, remote state and the restic cache"
+    Remove-Item $DataDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $DataDir) {
+        Write-Output "[uninstall] FAILED: could not delete $DataDir. Delete it by hand."
+        exit 1
+    }
+    Write-Step 'data directory removed'
+} else {
+    Write-Step 'no data directory left to remove'
+}
+Write-Step 'the device is still enrolled at the gateway; suspend it from the dashboard if it is decommissioned.'
 
 exit 0

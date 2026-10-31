@@ -26,7 +26,7 @@ import (
 
 // ErrNotEnrolled means the device has no credentials, so there is no repository
 // to talk to and no identity to report as.
-var ErrNotEnrolled = errors.New("this device is not enrolled: run 'agent enroll --token <token>'")
+var ErrNotEnrolled = errors.New("this device is not enrolled: run 'agent enroll -token <token>'")
 
 // ErrActionRequired means a human has to restore or correct something before a
 // backup would protect anything. The CLI maps it to exit code 4.
@@ -50,7 +50,7 @@ type gateway interface {
 type backupRunner interface {
 	Ping(ctx context.Context) error
 	Backup(ctx context.Context, include, exclude []string) (*restic.Result, error)
-	Stats(ctx context.Context, mode string) (*restic.Stats, error)
+	Stats(ctx context.Context, mode, snapshot string) (*restic.Stats, error)
 }
 
 // Agent ties together configuration, restic, the gateway and status reporting.
@@ -746,18 +746,20 @@ func (a *Agent) RefreshStats(ctx context.Context) {
 	if runner == nil {
 		return
 	}
-	raw, err := runner.Stats(ctx, restic.ModeRawData)
+	raw, err := runner.Stats(ctx, restic.ModeRawData, "")
 	if err != nil {
 		a.log.Debug("repository usage unavailable", "err", err)
 		return
 	}
-	restore, err := runner.Stats(ctx, restic.ModeRestoreSize)
+	// Both figures the customer reads describe the newest snapshot, not the sum
+	// of every snapshot ever taken. A cumulative file_count climbs on every
+	// hourly backup and turns "files protected" into a number nobody can square
+	// with the folder in front of them. repo_bytes remains whole-repository
+	// raw-data, which is what actually occupies space on the gateway.
+	restore, err := runner.Stats(ctx, restic.ModeRestoreSize, "latest")
 	if err != nil {
 		a.log.Debug("restore size unavailable", "err", err)
 	}
-	// raw-data reports bytes and snapshot count but not a file count, so taking
-	// file_count from it always wrote 0. restore-size reports the protected-file
-	// total the dashboard needs.
 	entry := &status.RepoStats{
 		RepoBytes:     raw.TotalSize,
 		SnapshotCount: raw.SnapshotsCount,

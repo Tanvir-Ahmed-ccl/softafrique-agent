@@ -18,7 +18,7 @@ the failure it prevents.
    dashboard issues a one-time token
               |
               v
-   agent enroll --token ...   --->  POST /enroll     (no auth, one-time)
+   agent enroll -token ...   --->  POST /enroll     (no auth, one-time)
               |                        returns device_id, device_password,
               |                                encryption_key, repository
               v
@@ -126,7 +126,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.25   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.26   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so
@@ -175,7 +175,12 @@ enrolled device.
   "consecutive_failures": 0,
   "backup_paths": ["C:\\CustomerData"],
   "repo_host": "backup.softafrique.net", // never a full URL
-  "repo_stats": { "repo_bytes": 0, "snapshot_count": 0, "captured_at": "" }
+  // restore_bytes and file_count describe the latest snapshot;
+  // repo_bytes is the whole repository, including history.
+  "repo_stats": {
+    "repo_bytes": 0, "restore_bytes": 0, "file_count": 0,
+    "snapshot_count": 0, "captured_at": ""
+  }
 }
 ```
 

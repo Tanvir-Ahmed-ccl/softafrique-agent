@@ -60,9 +60,10 @@ func TestBackupArgsCarryHostAndNoPassword(t *testing.T) {
 func TestRepositoryWideOperationsDoNotFilterByHost(t *testing.T) {
 	r := testRestic(t, nil)
 	operations := map[string][]string{
-		"snapshots": r.args("--json", "snapshots", "--latest", "1"),
-		"stats":     r.args("--json", "stats", "--mode", ModeRawData),
-		"restore":   r.args("restore", "latest", "--target", `C:\out`),
+		"snapshots":    r.args("--json", "snapshots", "--latest", "1"),
+		"stats":        r.args("--json", "stats", "--mode", ModeRawData),
+		"stats latest": r.args("--json", "stats", "--mode", ModeRestoreSize, "latest"),
+		"restore":      r.args("restore", "latest", "--target", `C:\out`),
 	}
 	for name, args := range operations {
 		if containsPair(args, "--host", "dev-01HQ8XK3M4N7") {
@@ -296,7 +297,7 @@ func TestIsRepoMissingRequiresTheRealCode(t *testing.T) {
 
 func TestStatsRejectsUnknownMode(t *testing.T) {
 	r := testRestic(t, nil)
-	if _, err := r.Stats(context.Background(), "banana"); err == nil {
+	if _, err := r.Stats(context.Background(), "banana", ""); err == nil {
 		t.Fatal("expected an unknown mode to be rejected before restic is run")
 	}
 }

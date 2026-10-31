@@ -282,12 +282,38 @@ jobs:
             'SELECT * FROM `Component`'
             'SELECT * FROM `FeatureComponents`'
             'SELECT * FROM `MsiLockPermissionsEx`'
+            'SELECT * FROM `ControlEvent`'
             'SELECT * FROM `InstallExecuteSequence`'
           )) {
             "QUERY: $q" | Tee-Object -FilePath $out -Append
             Invoke-MsiQuery $q | Tee-Object -FilePath $out -Append
           }
           Get-Content $out
+
+          # The folder prompt was in 0.2.25 but never appeared: its NewDialog
+          # publish tied with the built-in InstallDirDlg event. Assert the
+          # compiled ordering here, before a human walks the wizard again.
+          $sql = 'SELECT `Argument`, `Ordering` FROM `ControlEvent` WHERE `Dialog_`=''InstallDirDlg'' AND `Control_`=''Next'' AND `Event`=''NewDialog'''
+          $db = $msi.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$msi,@($path,0))
+          $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
+          $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
+          $orders = @{}
+          while ($true) {
+            $rec = $view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+            if ($null -eq $rec) { break }
+            $arg = $rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,1)
+            $orders[$arg] = [int]$rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,2)
+          }
+          if (-not $orders.ContainsKey('BackupPathDlg')) {
+            throw "the compiled UI has no NewDialog event for BackupPathDlg"
+          }
+          if (-not $orders.ContainsKey('VerifyReadyDlg')) {
+            throw "the compiled UI has no built-in VerifyReadyDlg event to order against"
+          }
+          if ($orders['BackupPathDlg'] -le $orders['VerifyReadyDlg']) {
+            throw "BackupPathDlg order $($orders['BackupPathDlg']) does not beat the built-in order $($orders['VerifyReadyDlg'])"
+          }
+          Write-Host "ok  the folder prompt runs after InstallDirDlg (order $($orders['BackupPathDlg']) > $($orders['VerifyReadyDlg']))"
 
       - name: smoke test the MSI layout
         run: |
@@ -323,14 +349,20 @@ jobs:
           }
           if ($bad) { throw "data directory grants access to Users/Authenticated Users/Everyone: $($bad.IdentityReference -join ', ')" }
           Set-Content -Path "$data\credentials.dat" -Value 'sentinel: uninstall must delete this'
+          Set-Content -Path "$data\status.json" -Value '{"enrolled":true}'
+          Set-Content -Path "$data\remote.json" -Value '{"stale":true}'
+          Set-Content -Path "$data\agent.log" -Value 'stale log'
+          New-Item -ItemType Directory -Force -Path "$data\restic-cache" | Out-Null
+          Set-Content -Path "$data\restic-cache\stale" -Value 'stale cache'
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
             '/x', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'uninstall.log'
           )
           if ($p.ExitCode -ne 0) { throw "uninstall exited $($p.ExitCode)" }
           if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "agent not removed" }
-          if (Test-Path "$data\credentials.dat") { throw "uninstall left the sealed credentials behind" }
-          if (-not (Test-Path "$data\config.yaml")) { throw "uninstall removed the diagnostic data directory" }
-          Write-Host "MSI installs and uninstalls cleanly, and removes the sealed credentials"
+          foreach ($name in 'credentials.dat','status.json','remote.json','config.yaml','agent.log','restic-cache') {
+            if (Test-Path "$data\$name") { throw "uninstall left $name behind" }
+          }
+          Write-Host "MSI installs and uninstalls cleanly, and removes credentials and stale state"
 
           # The RMM uninstall script has to find the product code on the machine,
           # because it cannot be written down anywhere: Product.wxs declares no
@@ -345,15 +377,19 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "reinstall exited $($p.ExitCode)" }
           $data = "$env:ProgramData\SoftafriqueBackupAgent"
           Set-Content -Path "$data\credentials.dat" -Value 'sentinel: uninstall must delete this'
+          Set-Content -Path "$data\status.json" -Value '{"enrolled":true}'
+          Set-Content -Path "$data\remote.json" -Value '{"stale":true}'
+          Set-Content -Path "$data\agent.log" -Value 'stale log'
+          New-Item -ItemType Directory -Force -Path "$data\restic-cache" | Out-Null
+          Set-Content -Path "$data\restic-cache\stale" -Value 'stale cache'
           & ./scripts/rmm/uninstall.ps1
           if ($LASTEXITCODE -ne 0) { throw "uninstall.ps1 exited $LASTEXITCODE" }
           if (Test-Path "$env:ProgramFiles\Softafrique Backup Agent\SoftafriqueBackupAgent.exe") { throw "uninstall.ps1 left the program files behind" }
           if (Get-Service -Name SoftafriqueBackupAgent -ErrorAction SilentlyContinue) { throw "uninstall.ps1 left the service registered" }
-          # The sealed key must go, but config/status stay readable for the
-          # ticket and so an operator can prove what the machine last did.
-          if (Test-Path "$data\credentials.dat") { throw "uninstall.ps1 left the sealed credentials behind" }
-          if (-not (Test-Path "$data\config.yaml")) { throw "uninstall.ps1 removed the diagnostic data directory" }
-          Write-Host "ok  uninstall.ps1 looks up the product code, removes the agent and deletes the key"
+          foreach ($name in 'credentials.dat','status.json','remote.json','config.yaml','agent.log','restic-cache') {
+            if (Test-Path "$data\$name") { throw "uninstall.ps1 left $name behind" }
+          }
+          Write-Host "ok  uninstall.ps1 looks up the product code and removes the agent, key and stale state"
 
       # A failing install is only diagnosable from its own log, and the log is
       # written into the workspace. Collected whatever the outcome, because the
@@ -382,10 +418,10 @@ jobs:
       # because it was not tested. So install again for real.
       #
       # No TESTINSTALL and no ENROLLTOKENFILE: the folder check and the full
-      # layout run. The service is installed and StartServices starts it, but it
-      # exits immediately because there are no credentials yet; no gateway is
+      # layout run. The service is installed and StartServices starts it; with no
+      # credentials it stays running and waits for enrollment, so no gateway is
       # needed. This is the same state install.ps1 sees before it enrols, and it
-      # starts the service again afterwards.
+      # restarts the service afterwards.
       - name: install for real and accept a missing backup folder
         shell: pwsh
         run: |

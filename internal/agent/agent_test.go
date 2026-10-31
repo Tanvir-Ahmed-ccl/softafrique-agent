@@ -47,13 +47,14 @@ func (f *fakeGateway) Health(context.Context) error { return f.healthErr }
 
 // fakeRestic records what it was asked to do.
 type fakeRestic struct {
-	backups     int
-	include     []string
-	result      *restic.Result
-	err         error
-	pingErr     error
-	statsCalls  int
-	statsByMode map[string]*restic.Stats
+	backups        int
+	include        []string
+	result         *restic.Result
+	err            error
+	pingErr        error
+	statsCalls     int
+	statsByMode    map[string]*restic.Stats
+	statsSnapshots map[string]string
 }
 
 func (f *fakeRestic) Ping(context.Context) error { return f.pingErr }
@@ -70,8 +71,12 @@ func (f *fakeRestic) Backup(_ context.Context, include, _ []string) (*restic.Res
 	return f.result, nil
 }
 
-func (f *fakeRestic) Stats(_ context.Context, mode string) (*restic.Stats, error) {
+func (f *fakeRestic) Stats(_ context.Context, mode, snapshot string) (*restic.Stats, error) {
 	f.statsCalls++
+	if f.statsSnapshots == nil {
+		f.statsSnapshots = make(map[string]string)
+	}
+	f.statsSnapshots[mode] = snapshot
 	if s := f.statsByMode[mode]; s != nil {
 		return s, nil
 	}
@@ -298,6 +303,12 @@ func TestSuccessfulBackupIsReported(t *testing.T) {
 	}
 	if rest.backups != 1 {
 		t.Fatalf("restic ran %d times", rest.backups)
+	}
+	if got := rest.statsSnapshots[restic.ModeRawData]; got != "" {
+		t.Errorf("repo_bytes stats used snapshot %q, want whole-repository", got)
+	}
+	if got := rest.statsSnapshots[restic.ModeRestoreSize]; got != "latest" {
+		t.Errorf("restore stats used snapshot %q, want latest", got)
 	}
 	// The gateway-assigned folder is what gets backed up.
 	if len(rest.include) != 1 || !strings.Contains(rest.include[0], "CustomerData") {

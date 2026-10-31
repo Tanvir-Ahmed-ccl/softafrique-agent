@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.25" ?>
+<?define ProductVersion="0.2.26" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -314,6 +314,16 @@
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; unenroll -yes -force -config &quot;[DATAFOLDER]config.yaml&quot;"
                  Before="RemoveCredentials" Sequence="execute" />
 
+    <!-- A standalone uninstall must also remove the state that would otherwise
+         make an uninstalled machine keep describing an old deployment:
+         status.json, remote.json, config.yaml, the log and restic's cache.
+         This runs after the credentials action, while the service is stopped,
+         and leaves the customer's protected folder and the repository alone.
+         The trailing "\." avoids ending the quoted argument in a backslash. -->
+    <SetProperty Id="PurgeAgentData"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; purge-data -data-dir &quot;[DATAFOLDER].&quot;"
+                 Before="PurgeAgentData" Sequence="execute" />
+
     <!-- The directory security descriptor above is not retroactive. Files that
          were created by an older version keep the ACE they inherited then, even
          after the parent DACL is replaced, which is how credentials.dat stayed
@@ -339,12 +349,12 @@
 
     <!-- ================= custom actions ================= -->
     <!--
-      These five are deferred, run in the SYSTEM context and use WixQuietExec,
+      These six are deferred, run in the SYSTEM context and use WixQuietExec,
       so a non-zero exit fails the operation instead of being logged and
       ignored. That matters: an install that "succeeded" while enrollment
       failed would leave a machine that looks deployed and protects nothing,
-      and an uninstall that quietly failed to delete the key would leave the
-      credentials this release exists to remove.
+      and an uninstall that quietly failed to delete the key or the stale status
+      would leave the credentials or a machine that still claims to be managed.
 
       The data-directory DACL itself is not a custom action: the MSI 5
       PermissionEx element above applies it through MsiLockPermissionsEx, so
@@ -372,6 +382,13 @@
           succeeds at nothing, which is the quietest possible failure.
     -->
     <CustomAction Id="RemoveCredentials"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="check"
+                  Impersonate="no" />
+
+    <CustomAction Id="PurgeAgentData"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
                   Execute="deferred"
@@ -413,6 +430,12 @@
            condition keeps credentials during an upgrade and deletes them only
            on a genuine uninstall. -->
       <Custom Action="RemoveCredentials" After="StopServices"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+
+      <!-- Same conditions as RemoveCredentials: a real uninstall, never the
+           outgoing half of a major upgrade. The credentials action has already
+           closed its log handle by the time this executable starts. -->
+      <Custom Action="PurgeAgentData" After="RemoveCredentials"
               Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
 
       <!-- Writes config.yaml. On an upgrade or a repair the file already exists
@@ -490,10 +513,10 @@
       description says so rather than implying an answer arrives on this page,
       and validatepath.exe can be run by hand to test a path first.
 
-      NOT YET VERIFIED: this needs a Windows host to compile and a human to walk
-      the UI. See docs/OPERATIONS.md. If the <Publish> below does not take effect
-      against WixUI_InstallDir's own sequence, the failure mode is that no prompt
-      appears and the install behaves exactly as 0.2.0 did, not a broken install.
+      The custom publishes carry Order=5 so they run after WixUI_InstallDir's
+      built-in NewDialog publish (Order=4) rather than losing to it. The
+      compiled ControlEvent table is dumped by the CI build, but the final check
+      is a human walking the wizard on a Windows host; see docs/OPERATIONS.md.
     -->
     <UI>
       <Dialog Id="BackupPathDlg" Width="370" Height="270" Title="Folder to protect">
@@ -529,7 +552,20 @@
       <!-- Take over the Next button on the install-location page so the folder
            page follows it. VerifyReadyDlg is where WixUI_InstallDir would have
            gone next, so nothing downstream of the sequence is lost. -->
-      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="BackupPathDlg" />
+      <!-- The built-in InstallDirDlg Next publishes NewDialog with Order=4,
+           and our dialog used to publish without an Order. Both events were
+           therefore present, the built-in one ran later, and the prompt never
+           appeared. A higher Order is what makes this the last NewDialog.
+
+           The condition repeats the built-in's WIXUI_INSTALLDIR_VALID check.
+           Without it, an invalid install directory would still show
+           InvalidDirDlg (built-in Order=3) and then this higher-order event
+           would navigate away from it to the folder prompt. -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog"
+               Value="BackupPathDlg" Order="5"
+               Condition="NOT Installed AND (WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;)" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog"
+               Value="BackupPathDlg" Order="5" Condition="NOT Installed" />
     </UI>
   </Package>
 </Wix>

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,6 +139,59 @@ func TestUnenrollForceDeletesAnUnreadableBlob(t *testing.T) {
 	}
 }
 
+// An uninstall must not leave a stale status/config/log/cache that makes the
+// next observer believe the machine is still managed. It must also never touch
+// the customer's protected folder.
+func TestPurgeDataRemovesAgentStateAndLeavesCustomerData(t *testing.T) {
+	root := t.TempDir()
+	data := filepath.Join(root, "agent-state")
+	if err := os.MkdirAll(filepath.Join(data, "restic-cache"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stateFiles := []string{
+		"credentials.dat", "status.json", "remote.json", "config.yaml",
+		"agent.log", "repo.password",
+	}
+	for _, name := range stateFiles {
+		if err := os.WriteFile(filepath.Join(data, name), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(data, "restic-cache", "blob"), []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	protected := filepath.Join(root, "CustomerData")
+	if err := os.MkdirAll(protected, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	protectedFile := filepath.Join(protected, "invoice.docx")
+	if err := os.WriteFile(protectedFile, []byte("customer data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmdPurgeData([]string{"-data-dir", data}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range stateFiles {
+		if _, err := os.Stat(filepath.Join(data, name)); !os.IsNotExist(err) {
+			t.Errorf("purge left %s behind", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(data, "restic-cache")); !os.IsNotExist(err) {
+		t.Error("purge left the restic cache behind")
+	}
+	if _, err := os.Stat(protectedFile); err != nil {
+		t.Errorf("purge touched the customer's protected folder: %v", err)
+	}
+}
+
+func TestPurgeDataRefusesAnEmptyDirectory(t *testing.T) {
+	if err := cmdPurgeData([]string{"-data-dir", ""}); err == nil {
+		t.Fatal("purge-data accepted an empty directory")
+	}
+}
+
 // The exit code is what an RMM task result is built from, so the mapping has to
 // distinguish "not enrolled yet" from "broken".
 func TestExitCodesAreDistinct(t *testing.T) {
@@ -189,6 +244,73 @@ func TestShortStatusIsOneLineAndHasNoSecrets(t *testing.T) {
 			t.Errorf("short status is missing %q: %s", field, line)
 		}
 	}
+}
+
+// status.json records the last run, but the credentials blob decides whether
+// the device is enrolled. An uninstall that leaves the file behind must not
+// make `status -short` tell a dashboard the machine is still protected.
+func TestStatusUsesCredentialsAsEnrollmentTruth(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := fmt.Sprintf("server: https://backup.softafrique.net/api/v1\n"+
+		"repo: rest:https://backup.softafrique.net/{device_id}\n"+
+		"data_dir: %q\n", dir)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := status.NewStore(filepath.Join(dir, "status.json"))
+	if err := store.Update(func(st *status.Status) {
+		st.Enrolled = true
+		st.DeviceID = "dev-stale"
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := cmdStatus([]string{"-short", "-config", cfgPath}); err != nil {
+			t.Fatalf("status failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "enrolled=false") {
+		t.Errorf("stale status.json was trusted after the key was removed: %s", out)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "credentials.dat"), []byte("present"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		if err := cmdStatus([]string{"-short", "-config", cfgPath}); err != nil {
+			t.Fatalf("status failed: %v", err)
+		}
+	})
+	if !strings.Contains(out, "enrolled=true") {
+		t.Errorf("an enrolled device was reported as not enrolled: %s", out)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = old
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }
 
 // orDash keeps the short status parseable when a field is unset.

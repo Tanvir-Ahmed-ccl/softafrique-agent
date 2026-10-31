@@ -92,6 +92,15 @@ func run(args []string) int {
 			return exitError
 		}
 		return exitOK
+	case "purge-data":
+		// Also dispatched before openEnv: the uninstall runs after config.yaml
+		// has been removed, and opening the log would both fail the purge and
+		// hold agent.log open on Windows.
+		if err := cmdPurgeData(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return exitError
+		}
+		return exitOK
 	}
 
 	var err error
@@ -433,6 +442,53 @@ func cmdRenderConfig(args []string) error {
 		return nil
 	}
 	fmt.Printf("wrote %s\n", *out)
+	return nil
+}
+
+// cmdPurgeData removes the local state an uninstall must not leave behind.
+//
+// It is deliberately separate from unenroll: unenroll needs config.yaml and
+// opens agent.log, while this has to work after the config is gone and while
+// Windows can still lock an open log. The MSI runs it after the credentials
+// action and before RemoveFiles. It never touches the customer's protected
+// folder or the repository.
+func cmdPurgeData(args []string) error {
+	fs := flag.NewFlagSet("purge-data", flag.ContinueOnError)
+	dataDir := fs.String("data-dir", config.DefaultDataDir(), "agent state directory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return purgeDataDir(*dataDir)
+}
+
+func purgeDataDir(dataDir string) error {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return errors.New("refusing to purge an empty data directory")
+	}
+	abs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return fmt.Errorf("could not resolve the data directory %q: %w", dataDir, err)
+	}
+	clean := filepath.Clean(abs)
+	if filepath.Dir(clean) == clean {
+		return fmt.Errorf("refusing to purge a filesystem root: %s", clean)
+	}
+	// config.yaml.template belongs to the MSI component and is removed by
+	// RemoveFiles. Everything here was written after installation.
+	for _, name := range []string{
+		"credentials.dat", "status.json", "remote.json", "config.yaml",
+		"agent.log", "repo.password",
+	} {
+		path := filepath.Join(clean, name)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("could not remove %s: %w", path, err)
+		}
+	}
+	cache := filepath.Join(clean, "restic-cache")
+	if err := os.RemoveAll(cache); err != nil {
+		return fmt.Errorf("could not remove %s: %w", cache, err)
+	}
 	return nil
 }
 
@@ -793,6 +849,11 @@ func cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	// status.json is a record of the last run, not proof of enrollment. After
+	// an uninstall or a manual key removal it can still say enrolled=true while
+	// every command that needs credentials exits 3. The credentials blob is the
+	// source of truth, so a stale file cannot make a dashboard lie.
+	st.Enrolled = env.cfg.SecretStore().Exists()
 	if short {
 		fmt.Println(shortStatus(st))
 		return nil
@@ -982,6 +1043,7 @@ Operations:
   status      Print status.json, or -short for one monitoring line.
   restore     Restore a snapshot into a folder.
   render-config  Write config.yaml from the installer template (used by the MSI).
+  purge-data    Remove local state (used by the MSI uninstall).
   version     Print the version.
 
 Common flags:

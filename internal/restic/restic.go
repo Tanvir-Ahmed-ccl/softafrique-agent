@@ -573,15 +573,22 @@ func (r *Restic) LatestSnapshot(ctx context.Context) (*Snapshot, error) {
 	return &snaps[0], nil
 }
 
-// Stats returns repository usage. It reads snapshot metadata only, so it is
-// cheap on a small repository, but it is still a round trip to the gateway and
-// is therefore called on a throttle rather than after every backup.
-func (r *Restic) Stats(ctx context.Context, mode string) (*Stats, error) {
+// Stats returns repository usage. An empty snapshot asks for the whole
+// repository; "latest" restricts the reading to the newest snapshot, which is
+// what a dashboard's "files protected" figure has to describe. It reads
+// snapshot metadata only, so it is cheap on a small repository, but it is still
+// a round trip to the gateway and is therefore called on a throttle rather
+// than after every backup.
+func (r *Restic) Stats(ctx context.Context, mode, snapshot string) (*Stats, error) {
 	if mode != ModeRestoreSize && mode != ModeRawData {
 		return nil, fmt.Errorf("unknown stats mode %q", mode)
 	}
+	args := []string{"--json", "stats", "--mode", mode}
+	if snapshot != "" {
+		args = append(args, snapshot)
+	}
 	sink := newStderrSink(r.log, r.opts.Repository)
-	cmd := r.newCmd(ctx, r.args("--json", "stats", "--mode", mode)...)
+	cmd := r.newCmd(ctx, r.args(args...)...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = sink

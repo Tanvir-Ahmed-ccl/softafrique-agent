@@ -28,6 +28,23 @@ or have an administrator copy the file out. An earlier draft of the package
 granted `Users` read on the directory to solve this; it did not work, because a
 non-inheritable directory ACE does not reach the files inside it.
 
+## Uninstalling
+
+A standalone MSI uninstall removes the service, the sealed credentials and the
+agent's local state: `status.json`, `remote.json`, `config.yaml`, `agent.log` and
+`restic-cache`. It leaves the customer's protected folder and the server-side
+repository untouched, so history survives an uninstall and reinstall.
+
+`uninstall.ps1` captures the last status line in its job output first, then
+performs the same cleanup. Use `-KeepStatus` if a copy of `status.json` is needed
+for a ticket; it is written to `%TEMP%`, not back into the data directory. The
+old `-PurgeCredentials` switch is accepted for compatibility but the data
+directory is now removed by default.
+
+If only the credentials are removed by hand, `status -short` reports
+`enrolled=false` immediately. It checks for `credentials.dat` rather than
+trusting the last status file.
+
 ## Reading the status file
 
 ```powershell
@@ -36,7 +53,7 @@ Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw | Convert
 
 | Field | Read it as |
 | --- | --- |
-| `enrolled` | `false` means the device has no key. Nothing is being protected. |
+| `enrolled` | `false` means the device has no key. Nothing is being protected. `status -short` reads this from the credentials blob, not the stale file, so a leftover `status.json` cannot claim a removed device is still enrolled. |
 | `server_status` | The gateway's view. Anything but `active` means backups are withheld. |
 | `action_required` | Written for a human. If it is set, read it; it says what to do. |
 | `last_attempt_status` | `running`, `success`, `failed`, `suspended` or `recreated`. `suspended` is not a failure: nothing was attempted. `recreated` means the protected folder was missing and was recreated, but no snapshot was taken: `last_success` did not move, `action_required` stays set, and the fix is a site visit. |
@@ -45,6 +62,8 @@ Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw | Convert
 | `last_duration_seconds` | Wall clock, including waiting for the network. This is what to quote a customer. |
 | `restic_duration_seconds` | restic's own number. Never quote this as the backup duration. |
 | `consecutive_failures` | Drives the "failing" alert. |
+| `repo_stats.restore_bytes` / `repo_stats.file_count` | Size and file count of the **latest snapshot**, which is the figure to show as "files protected". |
+| `repo_stats.repo_bytes` | Raw space the whole repository occupies, including history. |
 | `repo_stats.captured_at` | When the usage numbers were read, so a stale figure is distinguishable. |
 | `schedule_interval_seconds` | The effective interval after any gateway override. Use it for staleness thresholds. |
 
@@ -188,6 +207,11 @@ Tactical RMM's own download step verifies the hash it was given.
 
 ## Manual install (no RMM)
 
+An interactive install shows a **Folder to protect** page after the install
+location, pre-filled with `C:\SoftafriqueBackup`, so a hand-typed `msiexec /i`
+does not silently protect an empty default folder. The silent form sets the same
+value on the command line:
+
 ```powershell
 msiexec /i SoftafriqueBackupAgent.msi /qn BACKUPPATH="D:\CustomerData"
 $env:SOFTAFRIQUE_ENROLL_TOKEN = "<one-time token>"
@@ -195,6 +219,11 @@ $env:SOFTAFRIQUE_ENROLL_TOKEN = "<one-time token>"
 Remove-Item Env:\SOFTAFRIQUE_ENROLL_TOKEN
 Start-Service SoftafriqueBackupAgent
 ```
+
+Both forms run the same `validatepath.exe` check in the execute sequence. It is
+deferred, so on the interactive path a refused folder ends the install with a
+rollback and the reason in the MSI log; run `validatepath.exe` by hand first to
+see the sentence before committing to the path.
 
 ## What is not automated yet
 
@@ -208,16 +237,17 @@ Start-Service SoftafriqueBackupAgent
 * **Certificate-based TLS pinning.** Go enforces TLS 1.2 minimum. There is no
   pin, so a machine trusting a rogue CA could be intercepted. Deferred until
   mohsin decides whether the gateway will publish a stable certificate chain.
-* **The protected-folder prompt in the MSI.** The installer now shows a page
-  asking which folder to protect, so a hand-typed `msiexec /i` no longer silently
-  protects an empty `C:\SoftafriqueBackup`. **This has not been compiled or
-  walked through**: the WiX toolset is not available on the build host used for
-  0.2.0, and the dialog is inserted by taking over the Next button on the
-  install-location page. If that `<Publish>` does not take effect the failure mode
-  is benign — no prompt, and the install behaves exactly as 0.2.0 did. Compile
-  the MSI and click through it on a Windows host before the installer is used by
-  anyone. The RMM path does not depend on it: `install.ps1` prompts for
-  `-BackupPath` in PowerShell and installs with `/qn`, which runs no UI.
+* **The protected-folder prompt in the MSI.** The installer shows a page asking
+  which folder to protect, so a hand-typed `msiexec /i` no longer silently
+  protects an empty `C:\SoftafriqueBackup`. In 0.2.25 the page was compiled but
+  never appeared: its `NewDialog` publish tied with the built-in
+  `InstallDirDlg` event, which ran later and won. 0.2.26 gives the custom
+  publish `Order="5"` (the built-in is `Order="4"`), and the CI build now reads
+  the compiled `ControlEvent` table and fails if `BackupPathDlg` does not sort
+  after `VerifyReadyDlg`. A human still has to walk the wizard on a Windows host
+  before release; see [`JOINT-SESSION.md`](JOINT-SESSION.md). The RMM path does
+  not use the UI: `install.ps1` prompts for `-BackupPath` in PowerShell and
+  installs with `/qn`.
 * **The fixed-disk check, on a real machine.** The policy is confirmed: fixed
   disks only, a network share refused unless somebody opted in, and optical or
   removable drives refused with no opt-in. It lives in `internal/pathpolicy` and
