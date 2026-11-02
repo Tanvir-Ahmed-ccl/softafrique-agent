@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.26" ?>
+<?define ProductVersion="0.2.27" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -250,6 +250,20 @@
          validatepath.exe. -->
     <Property Id="BACKUPPATH" Value="C:\SoftafriqueBackup" />
 
+    <!-- A directory property may arrive with a trailing separator. Interpolating
+         it straight into a quoted argument produces a command line ending in
+         \", which Windows parses as an escaped quote: the executable then gets
+         a path with a literal quote on the end. That was the 0.2.26 failure.
+
+         The two actions below therefore interpolate BACKUPPATH with "\." after
+         it, which is a real path to the same directory and keeps the closing
+         quote unambiguous whether or not the input already ends in a separator.
+         This cannot be hidden in a second Property: the Property table does not
+         expand [BACKUPPATH] in a value, so that would pass the literal string
+         "[BACKUPPATH]\." to the action. It has to be expanded by the Type 51
+         custom action's Formatted value at execute time. pathpolicy.NormalizeDir
+         removes the sentinel once, inside the binaries, so config and validation
+         see the same clean path. -->
     <!-- STATUSFILE and LOGFILE are not set here. They used to be
          Property/@Value="[DATAFOLDER]status.json", which is a string literal,
          so the agent was handed a path called "[DATAFOLDER]status.json"; WiX
@@ -338,10 +352,10 @@
                  Before="ResetDataDirAcl" Sequence="execute" />
 
     <SetProperty Id="WriteConfig"
-                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]&quot;"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]\.&quot;"
                  Before="WriteConfig" Sequence="execute" />
     <SetProperty Id="ValidateBackupFolder"
-                 Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; [ALLOWUNCSWITCH]&quot;[BACKUPPATH]&quot;"
+                 Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; [ALLOWUNCSWITCH]&quot;[BACKUPPATH]\.&quot;"
                  Before="ValidateBackupFolder" Sequence="execute" />
     <SetProperty Id="EnrollDevice"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; enroll -token-file &quot;[ENROLLTOKENFILE]&quot; -config &quot;[DATAFOLDER]config.yaml&quot;"

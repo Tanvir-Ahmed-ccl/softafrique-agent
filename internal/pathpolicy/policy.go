@@ -278,6 +278,62 @@ func normalizeForCompare(path string) string {
 	return strings.ToLower(p)
 }
 
+// NormalizeDir returns a directory path in the form the installer and the
+// agent store it: no surrounding whitespace, no trailing separator, and no
+// command-line sentinel.
+//
+// BACKUPPATH is a directory property, so it may arrive with a trailing
+// backslash. Putting that value inside quotes in CustomActionData produces a
+// command line ending in \", which Windows reads as an escaped quote rather
+// than the end of the argument: the executable then receives a path with a
+// literal quote on the end. The MSI therefore passes "<path>\.", which is the
+// same directory after cleaning. This function is the one place that removes
+// the sentinel, so a new custom action cannot reintroduce the defect by
+// forgetting to trim the path itself.
+//
+// The comparison is deliberately Windows-aware even off Windows, because the
+// value comes from an MSI and the tests that guard this run on macOS too.
+func NormalizeDir(path string) string {
+	p := strings.TrimSpace(path)
+	if p == "" {
+		return ""
+	}
+
+	// A path that is not a Windows path is a developer-machine path; let the
+	// host's own rules handle it.
+	windowsPath := (len(p) >= 2 && p[1] == ':') || strings.HasPrefix(p, `\`)
+	if !windowsPath {
+		return filepath.Clean(p)
+	}
+
+	// A quote at the end is the old installer's escaped-closing-quote damage.
+	// Windows paths cannot contain a quote at all, so trimming it recovers the
+	// path that was meant instead of handing restic a folder name with a quote
+	// in it.
+	p = strings.TrimSuffix(p, `"`)
+
+	p = strings.ReplaceAll(p, "/", `\`)
+
+	// The installer's trailing "\." sentinel, and the equivalent after a real
+	// trailing separator, both collapse back to the directory itself.
+	for len(p) > 1 && strings.HasSuffix(p, `\.`) {
+		p = p[:len(p)-2]
+	}
+	if p == "" {
+		// The sentinel with no path in front of it: the property was empty.
+		return ""
+	}
+	p = strings.TrimRight(p, `\`)
+	if p == "" {
+		return `\`
+	}
+	// Do not turn a drive root into a drive-relative path: C:\ must stay C:\.
+	if len(p) == 2 && p[1] == ':' {
+		return p + `\`
+	}
+	return p
+}
+
 // IsUNC reports whether a path is a Windows UNC path, \\server\share\folder.
 //
 // The test is textual rather than a call to the network stack: this decides

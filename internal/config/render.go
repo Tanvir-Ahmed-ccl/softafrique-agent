@@ -6,6 +6,10 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"softafrique-backup-agent/internal/pathpolicy"
+
+	"gopkg.in/yaml.v3"
 )
 
 // The installer writes config.yaml from installer/config.yaml.template, filling
@@ -38,7 +42,8 @@ type RenderOptions struct {
 }
 
 func (o RenderOptions) withDefaults() (RenderOptions, error) {
-	if strings.TrimSpace(o.BackupPath) == "" {
+	o.BackupPath = pathpolicy.NormalizeDir(o.BackupPath)
+	if o.BackupPath == "" {
 		return o, fmt.Errorf("backup path is required; the MSI did not supply BACKUPPATH")
 	}
 	def := Default()
@@ -99,11 +104,31 @@ func Render(body []byte, opts RenderOptions) ([]byte, error) {
 // file, which is what the MSI's ConfigurableTextFile NeverOverwrite attribute
 // did: a repair, or an upgrade by a new major version, must not discard a
 // config a technician edited on site. It reports whether it wrote anything.
+//
+// The one exception is a file carrying the escaped path that 0.2.26 could
+// leave behind. A rollback does not undo that write, and NeverOverwrite would
+// otherwise preserve the damaged value across the upgrade that fixes the bug.
+// Only include entries that actually change are touched; comments and every
+// other setting stay as they were.
 func RenderToFile(template, out string, opts RenderOptions, force bool) (bool, error) {
 	if !force {
-		if _, err := os.Stat(out); err == nil {
-			return false, nil
-		} else if !os.IsNotExist(err) {
+		body, err := os.ReadFile(out)
+		switch {
+		case err == nil:
+			repaired, changed, rerr := normalizeExistingConfig(body)
+			if rerr != nil {
+				return false, rerr
+			}
+			if !changed {
+				return false, nil
+			}
+			if werr := writeFileAtomic(out, repaired); werr != nil {
+				return false, werr
+			}
+			return true, nil
+		case os.IsNotExist(err):
+			// Render the new file below.
+		default:
 			return false, err
 		}
 	}
@@ -120,6 +145,56 @@ func RenderToFile(template, out string, opts RenderOptions, force bool) (bool, e
 		return false, err
 	}
 	return true, nil
+}
+
+// normalizeExistingConfig repairs the damage 0.2.26 could do to an installed
+// config without disturbing anything else in it. It parses the document as a
+// yaml.Node so comments and the operator's edits survive, and rewrites only the
+// include values that NormalizeDir actually changes.
+func normalizeExistingConfig(body []byte) ([]byte, bool, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		// An unparseable on-site config is the agent's problem at startup, not
+		// something an installer should silently replace.
+		return body, false, nil
+	}
+
+	changed := false
+	var walk func(*yaml.Node)
+	walk = func(n *yaml.Node) {
+		if n.Kind == yaml.MappingNode {
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				key, value := n.Content[i], n.Content[i+1]
+				if key.Value == "include" && value.Kind == yaml.SequenceNode {
+					for _, item := range value.Content {
+						if item.Kind != yaml.ScalarNode {
+							continue
+						}
+						clean := pathpolicy.NormalizeDir(item.Value)
+						if clean != item.Value {
+							item.Value = clean
+							changed = true
+						}
+					}
+				}
+				walk(value)
+			}
+			return
+		}
+		for _, child := range n.Content {
+			walk(child)
+		}
+	}
+	walk(&doc)
+
+	if !changed {
+		return body, false, nil
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return body, false, err
+	}
+	return out, true, nil
 }
 
 // writeFileAtomic writes via a temporary file in the same directory and renames

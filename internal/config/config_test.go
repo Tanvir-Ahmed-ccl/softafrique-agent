@@ -156,6 +156,25 @@ verbose: false
 	}
 }
 
+// 0.2.26 could write a backup path whose trailing separator escaped the closing
+// quote in CustomActionData, leaving a literal quote in config.yaml. That file
+// survives an uninstall rollback and a repair does not overwrite it, so loading
+// has to recover the intended directory rather than hand restic a path with a
+// quote in it.
+func TestLoadRepairsTheEscapedQuoteFromTheBrokenInstaller(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+repo: "rest:https://backup.softafrique.net/dev-01"
+include:
+  - 'C:\SoftafriqueBackup"'
+`), nil)
+	if err != nil {
+		t.Fatalf("a config left behind by the broken installer must still load: %v", err)
+	}
+	if len(cfg.Include) != 1 || cfg.Include[0] != `C:\SoftafriqueBackup` {
+		t.Errorf("include = %#v, want the intended folder without the quote", cfg.Include)
+	}
+}
+
 // Tolerating a retired key must not become tolerating everything. A typo in a
 // key nobody reads is how 0.1.0 wrote credentials somewhere without an ACL, and
 // it stays fatal even when a retired key happens to be present in the same file.

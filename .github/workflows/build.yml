@@ -176,6 +176,11 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
+          # Only a tag carries a product version. Branches and pull requests
+          # still build and install the MSI, so give those a numeric CI version.
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          fi
           mkdir -p build/bin
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
             -ldflags "-s -w -X main.Version=${VERSION}" \
@@ -201,10 +206,13 @@ jobs:
           retention-days: 30
 
   msi:
-    name: build MSI
+    name: build and install MSI
     runs-on: windows-latest
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Build and install the MSI on every change, not only on a tag. A table
+    # check cannot catch a quoting bug in CustomActionData; an install and
+    # uninstall on a clean runner can. This is the gate that would have stopped
+    # 0.2.21 and 0.2.26 before they reached a customer.
     steps:
       - uses: actions/checkout@v4
 
@@ -232,6 +240,12 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
+          # A branch or pull request has no product version, and WiX rejects a
+          # non-numeric Package/@Version. The CI-only value still exercises the
+          # full install and uninstall path.
+          if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+            VERSION="0.0.${GITHUB_RUN_NUMBER}"
+          fi
           wix build installer/Product.wxs -arch x64 \
             -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
             -d ProductVersion="${VERSION}" \
@@ -422,15 +436,20 @@ jobs:
       # credentials it stays running and waits for enrollment, so no gateway is
       # needed. This is the same state install.ps1 sees before it enrols, and it
       # restarts the service afterwards.
-      - name: install for real and accept a missing backup folder
+      - name: install with a trailing separator, verify the service, then uninstall
         shell: pwsh
         run: |
           $backup = Join-Path $env:RUNNER_TEMP 'CustomerData'
           if (Test-Path $backup) { Remove-Item -Recurse -Force $backup }
 
+          # A directory property may end in a backslash. Pass it that way here
+          # on purpose: this is the exact 0.2.26 failure, where the quoted
+          # argument ended in \" and Windows read that as an escaped quote.
+          $backupArg = $backup.TrimEnd('\') + '\'
+
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
             '/i', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'real.log',
-            "BACKUPPATH=`"$backup`""
+            "BACKUPPATH=`"$backupArg`""
           )
           if ($p.ExitCode -ne 0) {
             $tail = (Get-Content real.log -Tail 30) -join "`n"
@@ -439,7 +458,14 @@ jobs:
           if (Test-Path $backup) {
             throw "the installer created $backup; the service must create it as the account that will use it"
           }
-          Write-Host "ok  the installer accepted $backup without creating it"
+          Write-Host "ok  the installer accepted a path with a trailing separator without creating it"
+
+          # The install smoke test the 0.2.26 build needed: the service the MSI
+          # claims to install has to exist and be running after a real install.
+          $svc = Get-Service -Name SoftafriqueBackupAgent -ErrorAction SilentlyContinue
+          if (-not $svc) { throw "the service was not registered by the MSI" }
+          if ($svc.Status -ne 'Running') { throw "the service is $($svc.Status), expected Running" }
+          Write-Host "ok  the service exists and is running"
 
           # The config the MSI wrote has to parse. This is checked on every build
           # because a config the agent cannot load stops the service dead at three
@@ -454,6 +480,17 @@ jobs:
           if (-not ($text -match '(?m)^allow_unc:\s*false\s*$')) {
             throw "config.yaml does not ship with the network-share opt-in off:`n$text"
           }
+          # The include value is the one place the escaped quote leaked into
+          # the installed file. It must be the clean path, not the path plus a
+          # quote or a trailing separator.
+          if (-not ($text -match "(?m)^\s*-\s*'([^']*)'\s*$")) {
+            throw "config.yaml has no single-quoted include entry:`n$text"
+          }
+          $include = $Matches[1]
+          if ($include -ne $backup) {
+            throw "config.yaml protects '$include', want '$backup'"
+          }
+          Write-Host "ok  config.yaml protects $include with no escaped quote or trailing separator"
           Write-Host "ok  config.yaml was written with its placeholders substituted"
 
           # The opt-in and an on-site edit both have to survive a repair. This

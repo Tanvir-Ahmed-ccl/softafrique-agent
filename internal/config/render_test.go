@@ -29,6 +29,34 @@ func TestRenderFillsTheInstallerTemplate(t *testing.T) {
 	}
 }
 
+// The MSI hands the path to render-config as "<path>\.", because a quoted
+// argument ending in a backslash escapes its own closing quote. The resulting
+// config must contain the directory itself, with no sentinel, no trailing
+// separator and no quote, whatever form the property arrived in.
+func TestRenderNormalizesTheBackupPathFromCustomActionData(t *testing.T) {
+	for _, in := range []string{
+		`C:\SoftafriqueBackup`,
+		`C:\SoftafriqueBackup\`,
+		`C:\SoftafriqueBackup\.`,
+		`C:\SoftafriqueBackup\\.`,
+		`C:\SoftafriqueBackup"`,
+	} {
+		out, err := Render(readFile(t, "../../installer/config.yaml.template"), RenderOptions{
+			BackupPath: in,
+		})
+		if err != nil {
+			t.Errorf("Render(%q): %v", in, err)
+			continue
+		}
+		if !strings.Contains(string(out), `- 'C:\SoftafriqueBackup'`) {
+			t.Errorf("Render(%q) did not write the clean path:\n%s", in, out)
+		}
+		if strings.Contains(string(out), `SoftafriqueBackup"`) {
+			t.Errorf("Render(%q) kept the escaped quote:\n%s", in, out)
+		}
+	}
+}
+
 func TestRenderRefusesWithoutABackupPath(t *testing.T) {
 	_, err := Render(readFile(t, "../../installer/config.yaml.template"), RenderOptions{})
 	if err == nil {
@@ -131,6 +159,44 @@ func TestRenderToFileDoesNotOverwrite(t *testing.T) {
 	}
 	if string(got) != edited {
 		t.Errorf("config was modified:\n got %q\nwant %q", got, edited)
+	}
+}
+
+// A rollback leaves config.yaml behind, and a repair or upgrade does not
+// overwrite it. The damaged include value therefore has to be repaired in place,
+// without discarding the rest of an on-site edit.
+func TestRenderToFileRepairsTheEscapedQuoteFromTheBrokenInstaller(t *testing.T) {
+	dir := t.TempDir()
+	template := filepath.Join(dir, "template.yaml")
+	out := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(template, []byte("version: 2\ninclude:\n  - '[BACKUPPATH]'\ndata_dir: '[DATADIR]'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	broken := "version: 2\ninclude:\n  - 'C:\\SoftafriqueBackup\"'\n# edited on site\ndata_dir: 'C:\\ProgramData\\SoftafriqueBackupAgent'\n"
+	if err := os.WriteFile(out, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wrote, err := RenderToFile(template, out, RenderOptions{BackupPath: `D:\Ignored`}, false)
+	if err != nil {
+		t.Fatalf("RenderToFile: %v", err)
+	}
+	if !wrote {
+		t.Fatal("the escaped path was left in place; an upgrade would keep protecting it")
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if !strings.Contains(text, `- 'C:\SoftafriqueBackup'`) {
+		t.Errorf("the include was not repaired:\n%s", text)
+	}
+	if strings.Contains(text, `SoftafriqueBackup"`) {
+		t.Errorf("the escaped quote is still in the config:\n%s", text)
+	}
+	if !strings.Contains(text, "# edited on site") {
+		t.Errorf("the repair discarded an on-site comment:\n%s", text)
 	}
 }
 

@@ -225,6 +225,16 @@ deferred, so on the interactive path a refused folder ends the install with a
 rollback and the reason in the MSI log; run `validatepath.exe` by hand first to
 see the sentence before committing to the path.
 
+A directory property can end in a backslash, and a quoted command-line argument
+that ends in `\` escapes its own closing quote. The MSI therefore passes the
+folder as `<path>\.` to both the validator and `render-config`, and the Go side
+normalises that sentinel once with `pathpolicy.NormalizeDir`. An existing
+`config.yaml` that carries the old escaped value is repaired in place at the
+next install, without discarding other on-site edits. The CI install job runs a
+real install with a trailing separator on `BACKUPPATH`, asserts the service is
+running, checks the rendered `include` value, and then uninstalls. That is the
+check a compiled-table assertion cannot provide.
+
 ## What is not automated yet
 
 * **Retention.** The gateway is append-only and the agent has no `forget` or
@@ -244,10 +254,12 @@ see the sentence before committing to the path.
   `InstallDirDlg` event, which ran later and won. 0.2.26 gives the custom
   publish `Order="5"` (the built-in is `Order="4"`), and the CI build now reads
   the compiled `ControlEvent` table and fails if `BackupPathDlg` does not sort
-  after `VerifyReadyDlg`. A human still has to walk the wizard on a Windows host
-  before release; see [`JOINT-SESSION.md`](JOINT-SESSION.md). The RMM path does
-  not use the UI: `install.ps1` prompts for `-BackupPath` in PowerShell and
-  installs with `/qn`.
+  after `VerifyReadyDlg`. The CI job also installs the MSI on every change with
+  `BACKUPPATH` set (including a trailing separator), asserts the service exists
+  and is running, and uninstalls it again. A human still has to walk the wizard
+  on a Windows host before release; see [`JOINT-SESSION.md`](JOINT-SESSION.md).
+  The RMM path does not use the UI: `install.ps1` prompts for `-BackupPath` in
+  PowerShell and installs with `/qn`.
 * **The fixed-disk check, on a real machine.** The policy is confirmed: fixed
   disks only, a network share refused unless somebody opted in, and optical or
   removable drives refused with no opt-in. It lives in `internal/pathpolicy` and

@@ -28,6 +28,7 @@ func TestValidateExitCodes(t *testing.T) {
 		{"empty", []string{""}, 2},
 		{"not a directory", []string{file}, 4},
 		{"good", []string{good}, 0},
+		{"trailing separator", []string{good + string(filepath.Separator)}, 0},
 		{"a volume root", []string{string(filepath.Separator)}, 5},
 	}
 	for _, tc := range cases {

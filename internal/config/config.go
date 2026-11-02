@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"softafrique-backup-agent/internal/api"
+	"softafrique-backup-agent/internal/pathpolicy"
 	"softafrique-backup-agent/internal/secret"
 
 	"gopkg.in/yaml.v3"
@@ -367,6 +368,13 @@ func withoutLegacyKeys(data []byte) ([]byte, error) {
 }
 
 func applyDefaults(cfg *Config) {
+	// Configs written by 0.2.26 can carry the installer's escaped closing quote
+	// on the backup path. Normalise every include here as well as at render time,
+	// so a device upgrading over one of those files protects the intended folder
+	// rather than a path with a quote in it.
+	for i, p := range cfg.Include {
+		cfg.Include[i] = pathpolicy.NormalizeDir(p)
+	}
 	if cfg.ResticPath == "" || cfg.ResticPath == "restic" {
 		if p := bundledRestic(); p != "" {
 			cfg.ResticPath = p

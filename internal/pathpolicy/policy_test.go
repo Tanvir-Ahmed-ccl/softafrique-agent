@@ -41,6 +41,33 @@ func TestIsUncTellsSharesFromOrdinaryPaths(t *testing.T) {
 	}
 }
 
+// BACKUPPATH is a directory property, so it can arrive with a trailing
+// separator, and the MSI passes it with a trailing "\." so the closing quote on
+// the command line cannot be escaped. Both forms have to collapse to the same
+// clean directory, or the installer validates one path and writes another.
+func TestNormalizeDirRemovesTrailingSeparatorsAndTheCommandLineSentinel(t *testing.T) {
+	cases := map[string]string{
+		`C:\SoftafriqueBackup`:    `C:\SoftafriqueBackup`,
+		`C:\SoftafriqueBackup\`:   `C:\SoftafriqueBackup`,
+		`C:\SoftafriqueBackup\.`:  `C:\SoftafriqueBackup`,
+		`C:\SoftafriqueBackup\\.`: `C:\SoftafriqueBackup`,
+		`C:/SoftafriqueBackup/`:   `C:\SoftafriqueBackup`,
+		`  C:\Customer Data\  `:   `C:\Customer Data`,
+		`C:\`:                     `C:\`,
+		`C:\.`:                    `C:\`,
+		`\.`:                      ``,
+		`\\server\share\`:         `\\server\share`,
+		`\\server\share\.`:        `\\server\share`,
+		`C:\SoftafriqueBackup"`:   `C:\SoftafriqueBackup`,
+		``:                        ``,
+	}
+	for in, want := range cases {
+		if got := NormalizeDir(in); got != want {
+			t.Errorf("NormalizeDir(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // The share half of the rule runs on every platform, so it is testable anywhere.
 // The volume half needs Windows and lives in volume_windows_test.go.
 func TestRequireFixedRefusesAShareUnlessOptedIn(t *testing.T) {

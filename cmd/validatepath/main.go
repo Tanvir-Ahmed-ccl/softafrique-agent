@@ -69,6 +69,7 @@ func parseArgs(args []string) (allowUNC bool, path string) {
 
 func validate(args []string) int {
 	allowUNC, raw := parseArgs(args)
+	raw = pathpolicy.NormalizeDir(raw)
 	if raw == "" {
 		fmt.Fprintln(os.Stderr, "no path given")
 		return 2
