@@ -62,10 +62,11 @@ Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw | Convert
 | `last_duration_seconds` | Wall clock, including waiting for the network. This is what to quote a customer. |
 | `restic_duration_seconds` | restic's own number. Never quote this as the backup duration. |
 | `consecutive_failures` | Drives the "failing" alert. |
-| `repo_stats.restore_bytes` / `repo_stats.file_count` | Size and file count of the **latest snapshot**, which is the figure to show as "files protected". |
+| `repo_stats.restore_bytes` / `repo_stats.file_count` | Restore size and restic's `total_file_count` for the **latest snapshot**. restic counts directories as nodes, so `file_count` is entries (files plus directories plus the snapshot root), not a pure file count. Do not label it "files protected" without accounting for that. |
 | `repo_stats.repo_bytes` | Raw space the whole repository occupies, including history. |
 | `repo_stats.captured_at` | When the usage numbers were read, so a stale figure is distinguishable. |
 | `schedule_interval_seconds` | The effective interval after any gateway override. Use it for staleness thresholds. |
+| `next_backup_time` | When the agent plans to run next. It is empty immediately after enrollment because no attempt has set a plan yet; the first scheduled run (or a failed attempt, which plans a retry) fills it. An empty value at enrollment is not a fault. |
 
 `last_backup_status` and `last_backup_time` are the 0.1.0 names for
 `last_attempt_status` and `last_success`. They are kept so monitoring written
@@ -75,6 +76,25 @@ A 0.1.0 `status.json` is migrated on read: the `repo` field, which held the
 repository URL with the password embedded in it, is dropped and the file is
 rewritten as schema 2. The 0.1.0 `password_file` is deleted on upgrade if it
 lives inside the data directory.
+
+## Changing the protected folder after install
+
+Use the dashboard. The gateway's `backup_path` overrides the local `include` on
+an enrolled device, so editing `config.yaml` on the machine is not the supported
+way to change what is protected.
+
+The MSI's **Change** is disabled in maintenance mode because the package has no
+independently selectable features. That is deliberate: reinstalling just to
+alter a path is more error-prone than making the change where the fleet is
+managed, and an install-time change would be overwritten by the gateway anyway.
+To move a device to a different folder, change `backup_path` for that device in
+the dashboard and wait for the next `/config` poll (or restart the service to
+fetch it immediately).
+
+The one exception is a device that must override the gateway, which support does
+by editing `include` in `config.yaml` and restarting the service. It is not a
+routine change and it makes the local file differ from the dashboard, so record
+why it was done.
 
 ## Common situations
 
@@ -207,10 +227,13 @@ Tactical RMM's own download step verifies the hash it was given.
 
 ## Manual install (no RMM)
 
-An interactive install shows a **Folder to protect** page after the install
-location, pre-filled with `C:\SoftafriqueBackup`, so a hand-typed `msiexec /i`
-does not silently protect an empty default folder. The silent form sets the same
-value on the command line:
+An interactive install shows a **Folder to protect** page after the license
+page, pre-filled with `C:\SoftafriqueBackup`, so a hand-typed `msiexec /i` does
+not silently protect an empty default folder. The install-location page is
+deliberately skipped: the service binary has no reason to live anywhere but
+Program Files, and two similar folder prompts in a row caused a technician to
+install the service into `C:\Windows`. The silent form sets the same value on the
+command line:
 
 ```powershell
 msiexec /i SoftafriqueBackupAgent.msi /qn BACKUPPATH="D:\CustomerData"
@@ -224,6 +247,17 @@ Both forms run the same `validatepath.exe` check in the execute sequence. It is
 deferred, so on the interactive path a refused folder ends the install with a
 rollback and the reason in the MSI log; run `validatepath.exe` by hand first to
 see the sentence before committing to the path.
+
+The check runs **before** `config.yaml` is written. A refused install therefore
+leaves no config behind, and a rollback custom action removes the config if a
+later step (enrollment, the ACL reset, the service start) fails after it was
+written. This matters because `render-config` preserves an existing
+`config.yaml` on repair and upgrade: a config left by a failed attempt used to be
+treated as an on-site edit and kept, so the next install could succeed while
+protecting the folder the previous attempt had been refused. As a further repair
+path, `render-config` replaces an existing config whose `include` names a
+protected system location such as `C:\Windows`, rather than preserving a folder
+the agent will never back up.
 
 A directory property can end in a backslash, and a quoted command-line argument
 that ends in `\` escapes its own closing quote. The MSI therefore passes the
@@ -247,19 +281,24 @@ check a compiled-table assertion cannot provide.
 * **Certificate-based TLS pinning.** Go enforces TLS 1.2 minimum. There is no
   pin, so a machine trusting a rogue CA could be intercepted. Deferred until
   mohsin decides whether the gateway will publish a stable certificate chain.
-* **The protected-folder prompt in the MSI.** The installer shows a page asking
-  which folder to protect, so a hand-typed `msiexec /i` no longer silently
-  protects an empty `C:\SoftafriqueBackup`. In 0.2.25 the page was compiled but
-  never appeared: its `NewDialog` publish tied with the built-in
-  `InstallDirDlg` event, which ran later and won. 0.2.26 gives the custom
-  publish `Order="5"` (the built-in is `Order="4"`), and the CI build now reads
-  the compiled `ControlEvent` table and fails if `BackupPathDlg` does not sort
-  after `VerifyReadyDlg`. The CI job also installs the MSI on every change with
-  `BACKUPPATH` set (including a trailing separator), asserts the service exists
-  and is running, and uninstalls it again. A human still has to walk the wizard
-  on a Windows host before release; see [`JOINT-SESSION.md`](JOINT-SESSION.md).
-  The RMM path does not use the UI: `install.ps1` prompts for `-BackupPath` in
-  PowerShell and installs with `/qn`.
+* **The protected-folder prompt in the MSI.** The installer shows exactly one
+  folder page, asking which folder to protect, so a hand-typed `msiexec /i` no
+  longer silently protects an empty `C:\SoftafriqueBackup`. In 0.2.25 the page
+  was compiled but never appeared: its `NewDialog` publish tied with the
+  built-in event, which ran later and won. The install-location page is now
+  skipped so the wizard does not ask for two folders in a row; a technician once
+  installed the service into `C:\Windows` from that page. The CI build reads the
+  compiled `ControlEvent` table and fails unless `BackupPathDlg` supersedes the
+  built-in `InstallDirDlg` event on `LicenseAgreementDlg`. It also reads the
+  compiled `InstallExecuteSequence` and fails unless `ValidateBackupFolder` runs
+  before `WriteConfig`, because that order is what stops a refused folder being
+  written. The CI job installs the MSI on every change with `BACKUPPATH` set
+  (including a trailing separator), then with a refused path and immediately
+  with a good one to prove the refused attempt left nothing behind, asserts the
+  service exists and is running, and uninstalls it again. A human still has to
+  walk the wizard on a Windows host before release; see
+  [`JOINT-SESSION.md`](JOINT-SESSION.md). The RMM path does not use the UI:
+  `install.ps1` prompts for `-BackupPath` in PowerShell and installs with `/qn`.
 * **The fixed-disk check, on a real machine.** The policy is confirmed: fixed
   disks only, a network share refused unless somebody opted in, and optical or
   removable drives refused with no opt-in. It lives in `internal/pathpolicy` and

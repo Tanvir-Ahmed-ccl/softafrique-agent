@@ -150,7 +150,7 @@ func TestPurgeDataRemovesAgentStateAndLeavesCustomerData(t *testing.T) {
 	}
 	stateFiles := []string{
 		"credentials.dat", "status.json", "remote.json", "config.yaml",
-		"agent.log", "repo.password",
+		"config.yaml.install-created", "agent.log", "repo.password",
 	}
 	for _, name := range stateFiles {
 		if err := os.WriteFile(filepath.Join(data, name), []byte("stale"), 0o600); err != nil {
@@ -189,6 +189,133 @@ func TestPurgeDataRemovesAgentStateAndLeavesCustomerData(t *testing.T) {
 func TestPurgeDataRefusesAnEmptyDirectory(t *testing.T) {
 	if err := cmdPurgeData([]string{"-data-dir", ""}); err == nil {
 		t.Fatal("purge-data accepted an empty directory")
+	}
+}
+
+// A failed install must remove the config.yaml it created, but a failed upgrade
+// must not remove the config a technician edited on site.
+func TestDiscardRenderedConfigOnlyRemovesAConfigThisInstallCreated(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	marker := filepath.Join(dir, "config.yaml.install-created")
+
+	// No marker: the config predates the transaction and must survive.
+	if err := os.WriteFile(cfg, []byte("include:\n  - 'D:\\CustomerData'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdDiscardRenderedConfig([]string{"-config", cfg, "-marker", marker}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cfg); err != nil {
+		t.Fatalf("rollback removed a config this install did not create: %v", err)
+	}
+
+	// Marker present: render-config created it, so rollback removes both.
+	if err := os.WriteFile(marker, []byte("created\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdDiscardRenderedConfig([]string{"-config", cfg, "-marker", marker}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cfg); !os.IsNotExist(err) {
+		t.Fatalf("rollback left the created config behind: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("rollback left its marker behind: %v", err)
+	}
+}
+
+func TestCommitRenderedConfigClearsTheMarkerButKeepsTheConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	marker := filepath.Join(dir, "config.yaml.install-created")
+	if err := os.WriteFile(cfg, []byte("include:\n  - 'D:\\CustomerData'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("created\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdCommitRenderedConfig([]string{"-marker", marker}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("the marker survived a successful install: %v", err)
+	}
+	if _, err := os.Stat(cfg); err != nil {
+		t.Fatalf("commit removed the installed config: %v", err)
+	}
+}
+
+// The marker is the rollback action's only evidence that config.yaml belongs to
+// this transaction. It must exist only for a file this run created.
+func TestRenderConfigMarksOnlyAConfigItCreated(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	marker := filepath.Join(dir, "config.yaml.install-created")
+	state := filepath.Join(dir, "state")
+	args := []string{
+		"-template", "../../installer/config.yaml.template",
+		"-out", cfg,
+		"-backup-path", `D:\CustomerData`,
+		"-data-dir", state,
+		"-status-file", filepath.Join(state, "status.json"),
+		"-log-file", filepath.Join(state, "agent.log"),
+		"-created-marker", marker,
+	}
+
+	if err := cmdRenderConfig(args); err != nil {
+		t.Fatalf("first render-config: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("render-config did not mark the config it created: %v", err)
+	}
+
+	// The second run finds an existing config, so it must clear the stale marker
+	// even though it leaves the file alone.
+	if err := cmdRenderConfig(args); err != nil {
+		t.Fatalf("second render-config: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("render-config kept a marker for a config it did not create: %v", err)
+	}
+	if _, err := os.Stat(cfg); err != nil {
+		t.Fatalf("render-config removed the existing config: %v", err)
+	}
+}
+
+// A render error must not leave a stale marker behind for rollback to act on:
+// the next install would otherwise delete a config it did not create.
+func TestRenderConfigClearsAStaleMarkerBeforeARenderError(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config.yaml")
+	marker := filepath.Join(dir, "config.yaml.install-created")
+	// A protected folder forces the render path instead of the preserve path, so
+	// the missing template below is read and fails the command.
+	if err := os.WriteFile(cfg, []byte("include:\n  - 'C:\\Windows'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte("stale\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state := filepath.Join(dir, "state")
+	err := cmdRenderConfig([]string{
+		"-template", filepath.Join(dir, "missing-template.yaml"),
+		"-out", cfg,
+		"-backup-path", `D:\CustomerData`,
+		"-data-dir", state,
+		"-status-file", filepath.Join(state, "status.json"),
+		"-log-file", filepath.Join(state, "agent.log"),
+		"-created-marker", marker,
+	})
+	if err == nil {
+		t.Fatal("render-config succeeded with a missing template")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("a failed render left the stale marker for rollback: %v", err)
+	}
+	if _, err := os.Stat(cfg); err != nil {
+		t.Fatalf("a failed render removed the existing config: %v", err)
 	}
 }
 

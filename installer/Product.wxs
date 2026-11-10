@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.27" ?>
+<?define ProductVersion="0.2.28" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -351,15 +351,40 @@
                  Value="&quot;[System64Folder]icacls.exe&quot; &quot;[DATAFOLDER]*&quot; /reset /T /C /Q"
                  Before="ResetDataDirAcl" Sequence="execute" />
 
-    <SetProperty Id="WriteConfig"
-                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]\.&quot;"
-                 Before="WriteConfig" Sequence="execute" />
+    <!-- Validate before writing, not after. The validator is what refuses
+         C:\Windows, C:\ProgramData, a share, a DVD drive and the agent's own data
+         directory; writing config.yaml first meant a refused path was already on
+         disk when the transaction rolled back, and the next install preserved it
+         as an "existing config". A device then enrolled with the folder the
+         previous attempt had been told was wrong. Nothing may be written for a
+         path that is about to be rejected. -->
     <SetProperty Id="ValidateBackupFolder"
                  Value="&quot;[INSTALLFOLDER]validatepath.exe&quot; [ALLOWUNCSWITCH]&quot;[BACKUPPATH]\.&quot;"
                  Before="ValidateBackupFolder" Sequence="execute" />
+    <SetProperty Id="WriteConfig"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; render-config -template &quot;[DATAFOLDER]config.yaml.template&quot; -out &quot;[DATAFOLDER]config.yaml&quot; -backup-path &quot;[BACKUPPATH]\.&quot; -created-marker &quot;[DATAFOLDER]config.yaml.install-created&quot;"
+                 Before="WriteConfig" Sequence="execute" />
     <SetProperty Id="EnrollDevice"
                  Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; enroll -token-file &quot;[ENROLLTOKENFILE]&quot; -config &quot;[DATAFOLDER]config.yaml&quot;"
                  Before="EnrollDevice" Sequence="execute" />
+
+    <!-- A rollback action is the other half of the ordering fix. Even with the
+         validator first, a later failure (enrollment, an ACL reset, the service
+         start) must not leave behind a config.yaml that this transaction
+         created, because the next install treats an existing config as an
+         on-site edit and keeps it.
+
+         The marker is written only when render-config creates the file from
+         nothing. A file that already existed was either preserved (upgrade or
+         repair) or deliberately replaced because it named a protected folder;
+         neither belongs to this transaction and neither is removed here. That
+         distinction is why the action cannot simply delete config.yaml. -->
+    <SetProperty Id="DiscardRenderedConfig"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; discard-rendered-config -config &quot;[DATAFOLDER]config.yaml&quot; -marker &quot;[DATAFOLDER]config.yaml.install-created&quot;"
+                 Before="DiscardRenderedConfig" Sequence="execute" />
+    <SetProperty Id="CommitRenderedConfig"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; commit-rendered-config -marker &quot;[DATAFOLDER]config.yaml.install-created&quot;"
+                 Before="CommitRenderedConfig" Sequence="execute" />
 
     <!-- ================= custom actions ================= -->
     <!--
@@ -437,6 +462,24 @@
                   Return="check"
                   Impersonate="no" />
 
+    <!-- Rollback must not mask the failure that caused it, so these two report
+         errors in the log but do not fail the rollback. The marker survives a
+         failed cleanup and is cleared at the start of the next render-config,
+         so a missed cleanup cannot poison a later install. -->
+    <CustomAction Id="DiscardRenderedConfig"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="rollback"
+                  Return="ignore"
+                  Impersonate="no" />
+
+    <CustomAction Id="CommitRenderedConfig"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+
     <InstallExecuteSequence>
       <!-- Remove the key after the service has stopped and before RemoveFiles
            deletes the executable this action runs. A major upgrade sets
@@ -452,26 +495,42 @@
       <Custom Action="PurgeAgentData" After="RemoveCredentials"
               Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
 
-      <!-- Writes config.yaml. On an upgrade or a repair the file already exists
-           and render-config keeps it, which is the NeverOverwrite behaviour the
-           old ConfigurableTextFile gave for free. The data-directory ACL was
-           applied by CreateFolders/InstallFiles before this action. -->
-      <Custom Action="WriteConfig" After="InstallFiles" Condition="NOT REMOVE" />
+      <!-- Validate before writing config.yaml. The files have to be installed
+           first because this action runs validatepath.exe, but a refused path
+           must leave no config behind for a later install to inherit. -->
+      <Custom Action="ValidateBackupFolder" After="InstallFiles"
+              Condition="NOT TESTINSTALL AND NOT REMOVE" />
+
+      <!-- Writes config.yaml only after the folder has been accepted. On an
+           upgrade or a repair the file already exists and render-config keeps
+           it, which is the NeverOverwrite behaviour the old
+           ConfigurableTextFile gave for free. The data-directory ACL was applied
+           by CreateFolders/InstallFiles before this action. -->
+      <Custom Action="WriteConfig" After="ValidateBackupFolder" Condition="NOT REMOVE" />
+
+      <!-- If any later action fails, remove the config.yaml this transaction
+           created. Rollback actions run in reverse, so this is reached before
+           the executed files are rolled back. A config that already existed is
+           not marked and is left alone. -->
+      <Custom Action="DiscardRenderedConfig" After="WriteConfig" Condition="NOT REMOVE" />
 
       <!-- Reset existing children after the parent DACL has been applied and
            after config.yaml has been written, so a file created by an earlier
            version cannot keep the ACE it inherited then. -->
       <Custom Action="ResetDataDirAcl" After="WriteConfig" Condition="NOT REMOVE" />
 
-      <Custom Action="ValidateBackupFolder" After="ResetDataDirAcl"
-              Condition="NOT TESTINSTALL AND NOT REMOVE" />
-
       <!-- Enrollment happens after the service exists and the data directory is
            locked down, and before StartServices runs, so the very first
            scheduled run already has credentials. install.ps1 does not pass a
            token file: it enrols after the MSI and then starts the service. -->
-      <Custom Action="EnrollDevice" After="ValidateBackupFolder"
+      <Custom Action="EnrollDevice" After="ResetDataDirAcl"
               Condition="NOT TESTINSTALL AND NOT REMOVE AND ENROLLTOKENFILE" />
+
+      <!-- Clear the rollback marker only after the service has been started, so
+           a failure anywhere up to and including StartServices still rolls the
+           new config back. Waiting until here also means a successful install
+           does not leave installer bookkeeping in the data directory. -->
+      <Custom Action="CommitRenderedConfig" After="StartServices" Condition="NOT REMOVE" />
     </InstallExecuteSequence>
 
     <!-- The check runs once, in the execute sequence, for every install mode:
@@ -527,13 +586,23 @@
       description says so rather than implying an answer arrives on this page,
       and validatepath.exe can be run by hand to test a path first.
 
+      This is the only folder the wizard asks for. WixUI_InstallDir normally
+      shows an install-location page before it, and a technician who typed
+      C:\Windows there got a LocalSystem service and three binaries loose in the
+      system directory from a package that refuses to back that directory up on
+      the very next page. The service binary has no reason to move, so the
+      install-location page is skipped: LicenseAgreementDlg goes straight to
+      this dialog, and Back returns there rather than to an install folder
+      prompt. INSTALLFOLDER still defaults to Program Files.
+
       The custom publishes carry Order=5 so they run after WixUI_InstallDir's
-      built-in NewDialog publish (Order=4) rather than losing to it. The
-      compiled ControlEvent table is dumped by the CI build, but the final check
-      is a human walking the wizard on a Windows host; see docs/OPERATIONS.md.
+      built-in NewDialog publishes (Order=4 or lower) rather than losing to
+      them. The compiled ControlEvent table is dumped by the CI build, but the
+      final check is a human walking the wizard on a Windows host; see
+      docs/OPERATIONS.md.
     -->
     <UI>
-      <Dialog Id="BackupPathDlg" Width="370" Height="270" Title="Folder to protect">
+      <Dialog Id="BackupPathDlg" Width="370" Height="270" Title="Softafrique Backup Agent Setup">
         <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15"
                  Transparent="no" NoPrefix="yes" Text="{\WixUI_Font_Title}Folder to protect" />
         <Control Id="Description" Type="Text" X="25" Y="23" Width="324" Height="39"
@@ -551,33 +620,33 @@
           <Publish Event="SpawnDialog" Value="CancelDlg" />
         </Control>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
-          <Publish Event="NewDialog" Value="InstallDirDlg" />
+          <Publish Event="NewDialog" Value="LicenseAgreementDlg" />
         </Control>
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17"
                  Default="yes" Text="Next">
-          <!-- VerifyReadyDlg is what WixUI_InstallDir shows after InstallDirDlg.
-               An earlier draft sent this to CostFinalize, which is not in that
-               set at all; the sequence is Welcome, LicenseAgreement,
-               InstallDir, VerifyReady, DiskCost. -->
+          <!-- VerifyReadyDlg is the confirmation page. The sequence this
+               package presents is Welcome, LicenseAgreement, Folder to protect,
+               VerifyReady, DiskCost; InstallDirDlg is intentionally skipped. An
+               earlier draft sent this to CostFinalize, which is not in the set
+               at all. -->
           <Publish Event="NewDialog" Value="VerifyReadyDlg" />
         </Control>
       </Dialog>
 
-      <!-- Take over the Next button on the install-location page so the folder
-           page follows it. VerifyReadyDlg is where WixUI_InstallDir would have
-           gone next, so nothing downstream of the sequence is lost. -->
-      <!-- The built-in InstallDirDlg Next publishes NewDialog with Order=4,
-           and our dialog used to publish without an Order. Both events were
-           therefore present, the built-in one ran later, and the prompt never
-           appeared. A higher Order is what makes this the last NewDialog.
+      <!-- Take over the Next button on the license page so the folder page
+           follows it and InstallDirDlg is never shown. VerifyReadyDlg is where
+           WixUI_InstallDir would have gone after InstallDirDlg, so nothing
+           downstream of the sequence is lost. -->
+      <!-- The built-in LicenseAgreementDlg Next publishes NewDialog with a
+           lower Order, and a custom publish without an Order used to tie and
+           lose. A higher Order is what makes this the last NewDialog.
 
-           The condition repeats the built-in's WIXUI_INSTALLDIR_VALID check.
-           Without it, an invalid install directory would still show
-           InvalidDirDlg (built-in Order=3) and then this higher-order event
-           would navigate away from it to the folder prompt. -->
-      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog"
+           The condition repeats the built-in's LicenseAccepted check. Without
+           it, Next would leave the license page even when the agreement had not
+           been accepted. -->
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog"
                Value="BackupPathDlg" Order="5"
-               Condition="NOT Installed AND (WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;)" />
+               Condition="NOT Installed AND LicenseAccepted=&quot;1&quot;" />
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog"
                Value="BackupPathDlg" Order="5" Condition="NOT Installed" />
     </UI>

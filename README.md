@@ -126,7 +126,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.27   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.28   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so
@@ -176,6 +176,7 @@ enrolled device.
   "backup_paths": ["C:\\CustomerData"],
   "repo_host": "backup.softafrique.net", // never a full URL
   // restore_bytes and file_count describe the latest snapshot;
+  // file_count is restic's node count (files and directories), not only files.
   // repo_bytes is the whole repository, including history.
   "repo_stats": {
     "repo_bytes": 0, "restore_bytes": 0, "file_count": 0,

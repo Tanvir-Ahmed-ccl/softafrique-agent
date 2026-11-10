@@ -105,16 +105,30 @@ func Render(body []byte, opts RenderOptions) ([]byte, error) {
 // did: a repair, or an upgrade by a new major version, must not discard a
 // config a technician edited on site. It reports whether it wrote anything.
 //
-// The one exception is a file carrying the escaped path that 0.2.26 could
-// leave behind. A rollback does not undo that write, and NeverOverwrite would
-// otherwise preserve the damaged value across the upgrade that fixes the bug.
-// Only include entries that actually change are touched; comments and every
-// other setting stay as they were.
+// There are two exceptions. A file carrying the escaped path that 0.2.26 could
+// leave behind is repaired in place, because a rollback does not undo that
+// write and NeverOverwrite would otherwise preserve the damaged value across the
+// upgrade that fixes the bug. Only include entries that actually change are
+// touched; comments and every other setting stay as they were. A file whose
+// include names a protected system folder is re-rendered from the template
+// instead, because that is a rollback leftover rather than an edit an operator
+// can have meant.
 func RenderToFile(template, out string, opts RenderOptions, force bool) (bool, error) {
 	if !force {
 		body, err := os.ReadFile(out)
 		switch {
 		case err == nil:
+			// An existing config is normally an on-site edit and is preserved.
+			// The exception is a config that names a protected system folder, such
+			// as C:\Windows or the agent's own data directory. That is not a
+			// setting an operator can have meant: the agent refuses it at run
+			// time, and a build before the validator/write order was fixed could
+			// leave it behind after a rolled-back install. Honouring the explicit
+			// -backup-path here repairs such a device on its next install instead
+			// of preserving the path the previous install was told was wrong.
+			if existingConfigNamesAProtectedFolder(body, opts) {
+				break
+			}
 			repaired, changed, rerr := normalizeExistingConfig(body)
 			if rerr != nil {
 				return false, rerr
@@ -145,6 +159,38 @@ func RenderToFile(template, out string, opts RenderOptions, force bool) (bool, e
 		return false, err
 	}
 	return true, nil
+}
+
+// existingConfigNamesAProtectedFolder reports whether an installed config asks
+// the agent to protect a location the agent will never back up. Only the keys
+// needed for that decision are decoded, so an otherwise unparseable or
+// hand-edited file is not changed here; startup reports that separately.
+func existingConfigNamesAProtectedFolder(body []byte, opts RenderOptions) bool {
+	var doc struct {
+		Include []string `yaml:"include"`
+		DataDir string   `yaml:"data_dir"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		return false
+	}
+
+	var extra []string
+	for _, dir := range []string{opts.DataDir, doc.DataDir} {
+		if strings.TrimSpace(dir) != "" {
+			extra = append(extra, dir)
+		}
+	}
+
+	for _, path := range doc.Include {
+		path = pathpolicy.NormalizeDir(path)
+		if path == "" {
+			continue
+		}
+		if pathpolicy.RequireNotProtected(path, extra...) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeExistingConfig repairs the damage 0.2.26 could do to an installed

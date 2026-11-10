@@ -644,7 +644,7 @@ and should not be re-litigated on the machine:
 | Check | How it is known | Result |
 | --- | --- | --- |
 | `validatepath` returns 7 for a share and 7 for an unresolvable share without touching the network | `volume_windows_test.go`, and the CI real-filesystem exercise | PASS (CI) |
-| The MSI validates `BACKUPPATH` before install and rolls back on failure | `Product.wxs` deferred `ValidateBackupFolder`, `Return="check"` | PASS (source) |
+| The MSI validates `BACKUPPATH` before writing `config.yaml` and rolls back on failure | `Product.wxs` deferred `ValidateBackupFolder`, then `WriteConfig`, `Return="check"` | PASS (source) |
 | A deleted protected folder is recreated and reported `recreated` | `TestDeletedProtectedFolderIsRecreatedAndNotAFailure` | PASS (CI) |
 | `status.json` cannot carry a secret | `TestStatusFileNeverContainsSecrets`, `TestMarshalledStatusContainsNoSecret` | PASS (CI) |
 | A share never reaches restic without the opt-in | `TestANetworkShareIsRefusedBeforeResticIsGivenThePath` | PASS (CI) |
@@ -697,3 +697,47 @@ Things this reply turned up; the first four are fixed in this repo now.
    gone, because the exit code alone is exactly what hid this.
 5. **`install.ps1`'s `-TimeoutSeconds` is declared but unused** (the status wait
    is a hardcoded 60 s). Cosmetic, but it should either be wired up or dropped.
+
+## 8. 0.2.27 review follow-up
+
+The review found the priority defect: `ValidateBackupFolder` refused
+`C:\Windows`, but `WriteConfig` ran first, so the refused path was already in
+`config.yaml`; the rollback left it, and the next install preserved it as an
+"existing config" and exited 0 while protecting the wrong folder.
+
+Fixed:
+
+1. **Validate before writing.** `ValidateBackupFolder` now runs immediately
+   after `InstallFiles` (it needs `validatepath.exe` to exist), and `WriteConfig`
+   runs after it. The CI build reads the compiled `InstallExecuteSequence` and
+   fails unless the order holds.
+2. **Rollback removes only what the transaction created.** `render-config`
+   writes `config.yaml.install-created` only when the file did not exist before;
+   on rollback `discard-rendered-config` removes the config only when that marker
+   is present. A failed upgrade therefore cannot delete an on-site edit. A
+   successful install clears the marker after `StartServices`.
+3. **Repair an already-poisoned device.** If an existing config names a
+   protected system folder (`C:\Windows`, Program Files, ProgramData, or the
+   agent's data directory), `render-config` re-renders it from the template with
+   the explicit `BACKUPPATH` instead of preserving a folder the agent will never
+   back up. Ordinary on-site edits are still preserved.
+4. **One folder prompt, not two.** The install-location page is skipped:
+   `LicenseAgreementDlg` now goes straight to `BackupPathDlg`. A technician had
+   typed `C:\Windows` into the install-location page and got the LocalSystem
+   service installed there by the same package that refuses to back it up. The
+   compiled UI assertion now checks that `BackupPathDlg` supersedes
+   `InstallDirDlg` on the license page.
+5. **CI reproduces the poisoning.** The real-install job now installs with
+   `BACKUPPATH=C:\Windows`, asserts it fails and leaves no `config.yaml`, then
+   immediately installs with a good path and asserts the rendered `include` is
+   that path, before uninstalling.
+
+The two non-defects are documented in `OPERATIONS.md`: `repo_stats.file_count`
+is restic's node count, so it includes directories (8 for 4 files, 3 subfolders
+and the snapshot root), and `next_backup_time` is empty immediately after
+enrollment because no attempt has set a plan yet. The MSI's maintenance-mode
+**Change** is disabled; changing the protected folder is a dashboard operation,
+with a local `include` edit reserved for a support-directed gateway override.
+
+Windows CI still has to build and run the MSI changes; this host cannot build
+WiX or exercise the installer.

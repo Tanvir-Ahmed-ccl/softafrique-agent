@@ -101,6 +101,21 @@ func run(args []string) int {
 			return exitError
 		}
 		return exitOK
+	case "discard-rendered-config":
+		// Rollback of an install that created config.yaml. Dispatched early for
+		// the same reason as purge-data.
+		if err := cmdDiscardRenderedConfig(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return exitError
+		}
+		return exitOK
+	case "commit-rendered-config":
+		// Clears the rollback marker after a successful install.
+		if err := cmdCommitRenderedConfig(rest); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return exitError
+		}
+		return exitOK
 	}
 
 	var err error
@@ -418,12 +433,30 @@ func cmdRenderConfig(args []string) error {
 	statusFile := fs.String("status-file", "", "status.json path (default inside data-dir)")
 	logFile := fs.String("log-file", "", "agent log path (default inside data-dir)")
 	force := fs.Bool("force", false, "overwrite an existing file")
+	marker := fs.String("created-marker", "", "record that this run created the file, for install rollback")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *template == "" || *out == "" {
 		fs.Usage()
 		return errors.New("render-config needs -template and -out")
+	}
+
+	existing := false
+	if _, err := os.Stat(*out); err == nil {
+		existing = true
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("could not inspect %s: %w", *out, err)
+	}
+
+	// A marker that outlived an earlier install is stale as soon as a config
+	// already exists: this run did not create it. Clear it before rendering, not
+	// after, so a render or write error cannot leave the stale marker for the
+	// rollback action to act on.
+	if *marker != "" && existing {
+		if rmErr := os.Remove(*marker); rmErr != nil && !os.IsNotExist(rmErr) {
+			return fmt.Errorf("could not clear the stale rollback marker %s: %w", *marker, rmErr)
+		}
 	}
 
 	wrote, err := config.RenderToFile(*template, *out, config.RenderOptions{
@@ -435,13 +468,72 @@ func cmdRenderConfig(args []string) error {
 	if err != nil {
 		return err
 	}
+
 	if !wrote {
 		// This is the NeverOverwrite case: a repair or an upgrade must not
 		// discard a config a technician edited on site.
 		fmt.Printf("kept existing %s\n", *out)
 		return nil
 	}
+
+	// Only a file that did not exist before belongs to this install. If the
+	// marker cannot be written, remove the new config rather than leave a file
+	// that a rollback would not know to delete.
+	if *marker != "" && !existing {
+		if err := os.WriteFile(*marker, []byte("created by render-config\n"), 0o600); err != nil {
+			_ = os.Remove(*out)
+			return fmt.Errorf("config was written but the rollback marker could not be created: %w", err)
+		}
+	}
 	fmt.Printf("wrote %s\n", *out)
+	return nil
+}
+
+// cmdDiscardRenderedConfig is the rollback half of the installer's
+// config-writing action. It removes config.yaml only when the marker shows that
+// this install created it; a config that existed before the install is left
+// alone, so a failed upgrade cannot delete an on-site edit.
+func cmdDiscardRenderedConfig(args []string) error {
+	fs := flag.NewFlagSet("discard-rendered-config", flag.ContinueOnError)
+	configPath := fs.String("config", "", "config.yaml written by this install")
+	marker := fs.String("marker", "", "marker written when that install created the file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *marker == "" {
+		return errors.New("discard-rendered-config needs -marker")
+	}
+	if _, err := os.Stat(*marker); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("could not inspect the rollback marker %s: %w", *marker, err)
+	}
+	if *configPath != "" {
+		if err := os.Remove(*configPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("could not remove %s: %w", *configPath, err)
+		}
+	}
+	if err := os.Remove(*marker); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("could not remove the rollback marker %s: %w", *marker, err)
+	}
+	return nil
+}
+
+// cmdCommitRenderedConfig clears the marker after a successful install, so a
+// later repair or uninstall does not carry installer bookkeeping forever.
+func cmdCommitRenderedConfig(args []string) error {
+	fs := flag.NewFlagSet("commit-rendered-config", flag.ContinueOnError)
+	marker := fs.String("marker", "", "marker to clear")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *marker == "" {
+		return errors.New("commit-rendered-config needs -marker")
+	}
+	if err := os.Remove(*marker); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("could not remove the rollback marker %s: %w", *marker, err)
+	}
 	return nil
 }
 
@@ -478,7 +570,7 @@ func purgeDataDir(dataDir string) error {
 	// RemoveFiles. Everything here was written after installation.
 	for _, name := range []string{
 		"credentials.dat", "status.json", "remote.json", "config.yaml",
-		"agent.log", "repo.password",
+		"config.yaml.install-created", "agent.log", "repo.password",
 	} {
 		path := filepath.Join(clean, name)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -1043,6 +1135,8 @@ Operations:
   status      Print status.json, or -short for one monitoring line.
   restore     Restore a snapshot into a folder.
   render-config  Write config.yaml from the installer template (used by the MSI).
+  commit-rendered-config   Clear the install-created marker after a successful install.
+  discard-rendered-config  Remove config.yaml after a rolled-back install.
   purge-data    Remove local state (used by the MSI uninstall).
   version     Print the version.
 

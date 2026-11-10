@@ -305,9 +305,13 @@ jobs:
           Get-Content $out
 
           # The folder prompt was in 0.2.25 but never appeared: its NewDialog
-          # publish tied with the built-in InstallDirDlg event. Assert the
-          # compiled ordering here, before a human walks the wizard again.
-          $sql = 'SELECT `Argument`, `Ordering` FROM `ControlEvent` WHERE `Dialog_`=''InstallDirDlg'' AND `Control_`=''Next'' AND `Event`=''NewDialog'''
+          # publish tied with a built-in event. It must now replace the
+          # install-location page, not follow it: a technician who typed
+          # C:\Windows into that page once got a LocalSystem service installed
+          # in the system directory by the same package that refuses to back
+          # that directory up on the next page. Assert the compiled ordering
+          # here, before a human walks the wizard again.
+          $sql = 'SELECT `Argument`, `Ordering` FROM `ControlEvent` WHERE `Dialog_`=''LicenseAgreementDlg'' AND `Control_`=''Next'' AND `Event`=''NewDialog'''
           $db = $msi.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$msi,@($path,0))
           $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
           $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
@@ -321,13 +325,39 @@ jobs:
           if (-not $orders.ContainsKey('BackupPathDlg')) {
             throw "the compiled UI has no NewDialog event for BackupPathDlg"
           }
-          if (-not $orders.ContainsKey('VerifyReadyDlg')) {
-            throw "the compiled UI has no built-in VerifyReadyDlg event to order against"
+          if (-not $orders.ContainsKey('InstallDirDlg')) {
+            throw "the compiled UI has no built-in InstallDirDlg event to supersede"
           }
-          if ($orders['BackupPathDlg'] -le $orders['VerifyReadyDlg']) {
-            throw "BackupPathDlg order $($orders['BackupPathDlg']) does not beat the built-in order $($orders['VerifyReadyDlg'])"
+          if ($orders['BackupPathDlg'] -le $orders['InstallDirDlg']) {
+            throw "BackupPathDlg order $($orders['BackupPathDlg']) does not beat the built-in InstallDirDlg order $($orders['InstallDirDlg'])"
           }
-          Write-Host "ok  the folder prompt runs after InstallDirDlg (order $($orders['BackupPathDlg']) > $($orders['VerifyReadyDlg']))"
+          Write-Host "ok  the folder prompt replaces InstallDirDlg (order $($orders['BackupPathDlg']) > $($orders['InstallDirDlg']))"
+
+          # The 0.2.27 defect was sequencing: WriteConfig ran before
+          # ValidateBackupFolder, so a path the installer was about to refuse
+          # had already been written and survived the rollback. The order is
+          # load-bearing, so assert it in the compiled table rather than only in
+          # a comment.
+          $sql = 'SELECT `Action`, `Sequence` FROM `InstallExecuteSequence` WHERE `Action`=''ValidateBackupFolder'' OR `Action`=''WriteConfig'''
+          $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
+          $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
+          $seq = @{}
+          while ($true) {
+            $rec = $view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+            if ($null -eq $rec) { break }
+            $action = $rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,1)
+            $seq[$action] = [int]$rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,2)
+          }
+          if (-not $seq.ContainsKey('ValidateBackupFolder')) {
+            throw "the compiled install sequence has no ValidateBackupFolder action"
+          }
+          if (-not $seq.ContainsKey('WriteConfig')) {
+            throw "the compiled install sequence has no WriteConfig action"
+          }
+          if ($seq['ValidateBackupFolder'] -ge $seq['WriteConfig']) {
+            throw "ValidateBackupFolder ($($seq['ValidateBackupFolder'])) must run before WriteConfig ($($seq['WriteConfig']))"
+          }
+          Write-Host "ok  the folder is validated before config.yaml is written (sequence $($seq['ValidateBackupFolder']) < $($seq['WriteConfig']))"
 
       - name: smoke test the MSI layout
         run: |
@@ -532,6 +562,48 @@ jobs:
             throw "the install failed for the wrong reason; the log does not mention the share"
           }
           Write-Host "ok  a network share is refused, and the log says why"
+
+          # The 0.2.27 poisoning defect. WriteConfig used to run before
+          # ValidateBackupFolder, so C:\Windows was written into config.yaml
+          # before it was refused, the rollback left the file, and the next
+          # install preserved it as an on-site edit. A refused install must leave
+          # no config behind at all.
+          $data = "$env:ProgramData\SoftafriqueBackupAgent"
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'protected-refused.log',
+            'BACKUPPATH=C:\Windows'
+          )
+          if ($p.ExitCode -eq 0) { throw "the installer backed up C:\Windows" }
+          if (Test-Path "$data\config.yaml") {
+            throw "a refused install left config.yaml behind; the next install would preserve the rejected folder"
+          }
+          Write-Host "ok  a refused folder leaves no config.yaml behind"
+
+          # And a correct install immediately afterwards must protect the folder
+          # the technician typed, not the one the failed attempt left behind.
+          $good = Join-Path $env:RUNNER_TEMP 'RecoveredCustomerData'
+          if (Test-Path $good) { Remove-Item -Recurse -Force $good }
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/i', 'SoftafriqueBackupAgent.msi', '/qn', '/l*v', 'recovered.log',
+            "BACKUPPATH=`"$good`""
+          )
+          if ($p.ExitCode -ne 0) {
+            $tail = (Get-Content recovered.log -Tail 30) -join "`n"
+            throw "the install after a refused attempt exited $($p.ExitCode):`n$tail"
+          }
+          $text = Get-Content "$data\config.yaml" -Raw
+          if (-not ($text -match "(?m)^\s*-\s*'([^']*)'\s*$")) {
+            throw "config.yaml has no single-quoted include entry after the recovery install:`n$text"
+          }
+          $include = $Matches[1]
+          if ($include -ne $good) {
+            throw "the recovery install protects '$include', want '$good'; a failed install poisoned the next one"
+          }
+          Write-Host "ok  an install after a refused attempt protects the folder that was typed"
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+            '/x', 'SoftafriqueBackupAgent.msi', '/qn'
+          )
+          if ($p.ExitCode -ne 0) { throw "uninstall after the recovery install exited $($p.ExitCode)" }
 
       - uses: actions/upload-artifact@v4
         if: always()

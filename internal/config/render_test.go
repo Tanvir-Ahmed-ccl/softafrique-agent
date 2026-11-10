@@ -162,6 +162,43 @@ func TestRenderToFileDoesNotOverwrite(t *testing.T) {
 	}
 }
 
+// A config left behind by the install that refused C:\Windows must not make the
+// next install keep C:\Windows. The explicit -backup-path wins over a file that
+// names a location the agent will never back up; an ordinary on-site edit is
+// still preserved by TestRenderToFileDoesNotOverwrite.
+func TestRenderToFileReplacesAConfigThatNamesAProtectedFolder(t *testing.T) {
+	dir := t.TempDir()
+	template := filepath.Join(dir, "template.yaml")
+	out := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(template, []byte("version: 2\ninclude:\n  - '[BACKUPPATH]'\ndata_dir: '[DATADIR]'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	poisoned := "version: 2\ninclude:\n  - 'C:\\Windows'\ndata_dir: 'C:\\ProgramData\\SoftafriqueBackupAgent'\n"
+	if err := os.WriteFile(out, []byte(poisoned), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wrote, err := RenderToFile(template, out, RenderOptions{BackupPath: `C:\SoftafriqueBackup`}, false)
+	if err != nil {
+		t.Fatalf("RenderToFile: %v", err)
+	}
+	if !wrote {
+		t.Fatal("the protected-folder config was preserved; the device would install protecting C:\\Windows")
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if !strings.Contains(text, `- 'C:\SoftafriqueBackup'`) {
+		t.Errorf("the explicit backup path was not written:\n%s", text)
+	}
+	if strings.Contains(text, `- 'C:\Windows'`) {
+		t.Errorf("the protected folder survived:\n%s", text)
+	}
+}
+
 // A rollback leaves config.yaml behind, and a repair or upgrade does not
 // overwrite it. The damaged include value therefore has to be repaired in place,
 // without discarding the rest of an on-site edit.
