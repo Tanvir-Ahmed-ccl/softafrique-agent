@@ -259,6 +259,12 @@ path, `render-config` replaces an existing config whose `include` names a
 protected system location such as `C:\Windows`, rather than preserving a folder
 the agent will never back up.
 
+A failed upgrade must also leave the working install alone. `RemoveExistingProducts`
+is therefore scheduled with `afterInstallFinalize`: the new package has to
+succeed before the old one is removed. The default schedule uninstalls the old
+product before the new one is validated, so a mistyped upgrade path would take a
+protected customer offline instead of simply failing the upgrade.
+
 A directory property can end in a backslash, and a quoted command-line argument
 that ends in `\` escapes its own closing quote. The MSI therefore passes the
 folder as `<path>\.` to both the validator and `render-config`, and the Go side

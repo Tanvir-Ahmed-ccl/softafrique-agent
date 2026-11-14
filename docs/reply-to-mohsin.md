@@ -741,3 +741,31 @@ with a local `include` edit reserved for a support-directed gateway override.
 
 Windows CI still has to build and run the MSI changes; this host cannot build
 WiX or exercise the installer.
+
+## 9. 0.2.29: failed upgrade leaves the working agent installed
+
+The remaining defect was upgrade sequencing, not the poisoning fix. 0.2.28
+scheduled `RemoveExistingProducts` with WiX's default (`afterInstallValidate`),
+so a bad `BACKUPPATH` failed the new install after the old product had already
+been removed. On the test machine that left no service, an empty Program Files
+folder and no Uninstall entry.
+
+Fixed with `Schedule="afterInstallFinalize"` in `MajorUpgrade`: the new package
+has to install successfully before the old one is touched. A failed upgrade now
+leaves the working version enrolled, running and protected. The CI build reads
+the compiled `InstallExecuteSequence` and fails unless
+`RemoveExistingProducts` sorts after `InstallFinalize`, so this cannot regress
+silently.
+
+On `file_count`: yes, counting directories is intended by restic but it is not a
+customer-facing "files protected" number as-is. `repo_stats.file_count` is
+restic's `total_file_count`, which counts directories as nodes as well as files
+(8 for four files, three subfolders and the snapshot root). If the dashboard
+labels it "files protected", either relabel it as entries or subtract
+directories before display; `OPERATIONS.md` now says this explicitly.
+
+The three wizard items remain unverified on this build by design: 0.2.28 removed
+the install-location page and retitled the folder page, but none of that is
+exercised by a silent install. They should be checked on the next clean
+deployment. Maintenance-mode **Change** is intentionally disabled; the supported
+way to change the protected folder is the dashboard.

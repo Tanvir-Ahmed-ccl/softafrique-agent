@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.28" ?>
+<?define ProductVersion="0.2.29" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -57,8 +57,16 @@
 
     <!-- A major upgrade replaces the binaries but leaves the sealed credentials
          in ProgramData alone, so a patch never leaves a working device
-         unenrolled and unprotected. The new version reads the existing blob. -->
+         unenrolled and unprotected. The new version reads the existing blob.
+
+         Schedule="afterInstallFinalize" is load-bearing. The default removes the
+         installed product before the new one is installed, so a failed install
+         of the new version leaves the machine with neither: a technician who
+         mistyped the folder during an upgrade uninstalled the working agent and
+         the customer silently stopped being protected. The new package has to
+         install successfully before the old one is touched. -->
     <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  Schedule="afterInstallFinalize"
                   DowngradeErrorMessage="A newer version of the Softafrique Backup Agent is already installed. Remove it first." />
 
     <MediaTemplate EmbedCab="yes" />

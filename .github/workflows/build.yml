@@ -359,6 +359,32 @@ jobs:
           }
           Write-Host "ok  the folder is validated before config.yaml is written (sequence $($seq['ValidateBackupFolder']) < $($seq['WriteConfig']))"
 
+          # A failed upgrade must not uninstall the working agent. The default
+          # major-upgrade schedule removes the installed product before the new
+          # one is even validated, so a mistyped upgrade path left the customer
+          # with no agent at all. RemoveExistingProducts has to follow
+          # InstallFinalize, once the new package has succeeded.
+          $sql = 'SELECT `Action`, `Sequence` FROM `InstallExecuteSequence` WHERE `Action`=''RemoveExistingProducts'' OR `Action`=''InstallFinalize'''
+          $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
+          $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
+          $upgradeSeq = @{}
+          while ($true) {
+            $rec = $view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+            if ($null -eq $rec) { break }
+            $action = $rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,1)
+            $upgradeSeq[$action] = [int]$rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,2)
+          }
+          if (-not $upgradeSeq.ContainsKey('RemoveExistingProducts')) {
+            throw "the compiled install sequence has no RemoveExistingProducts action"
+          }
+          if (-not $upgradeSeq.ContainsKey('InstallFinalize')) {
+            throw "the compiled install sequence has no InstallFinalize action"
+          }
+          if ($upgradeSeq['RemoveExistingProducts'] -le $upgradeSeq['InstallFinalize']) {
+            throw "RemoveExistingProducts ($($upgradeSeq['RemoveExistingProducts'])) must run after InstallFinalize ($($upgradeSeq['InstallFinalize'])), or a failed upgrade uninstalls the working agent"
+          }
+          Write-Host "ok  the old product is removed only after the new one installs (RemoveExistingProducts $($upgradeSeq['RemoveExistingProducts']) > InstallFinalize $($upgradeSeq['InstallFinalize']))"
+
       - name: smoke test the MSI layout
         run: |
           # An unsigned MSI still lays out and rolls back, which is what breaks
