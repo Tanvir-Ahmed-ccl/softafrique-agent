@@ -783,3 +783,21 @@ tag, the tag names the commit being built, and the version differs from the
 previous release. It also checks that the Makefile, `Product.wxs` and
 `build-windows.sh` all declare the tag's version, so a local `make msi` cannot
 quietly produce the old one.
+
+## 11. 0.2.31: closing the minor acceptance items
+
+The wizard now uses `WixUI_FeatureTree` only for its Welcome/License sequence.
+That dialog set has no install-location page at all, so the Destination Folder
+page that allowed a service install into `C:\Windows` cannot appear. Its
+features page is skipped by the same `LicenseAgreementDlg` override that already
+goes to the protected-folder page. Maintenance-mode Change stays disabled with
+`ARPNOMODIFY`, and the install guide now says the protected folder is changed
+from the dashboard. The custom page's title bar and heading both read
+"Softafrique Backup Agent Setup". CI now fails if any wizard event opens
+`InstallDirDlg`, not only if the folder page loses its ordering race.
+
+On `file_count`: it is restic's node count, so 8 for four files, three
+subfolders and the snapshot root is intended by restic but is not a pure file
+count. The field stays as-is for schema compatibility and should be labelled
+"entries" wherever it is shown. A true file-only count would need a full
+`restic ls latest` walk on every stats refresh; say if you want that cost.

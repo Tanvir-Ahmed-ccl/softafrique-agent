@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.30" ?>
+<?define ProductVersion="0.2.31" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -288,6 +288,13 @@
          the network. -->
     <Property Id="TESTINSTALL" Secure="yes" />
 
+    <!-- The dialog set is used for its Welcome/License sequence, not its
+         features. Change in maintenance mode is disabled because the package
+         has no independently selectable features and the protected folder is
+         changed from the dashboard. WixUI_InstallDir set this property itself;
+         WixUI_FeatureTree does not, so it is set here. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
+
     <!-- Set ALLOWUNC=1 to permit a network share as the folder to protect. A
          network share is refused by default, and this is the only way past it.
 
@@ -557,14 +564,21 @@
          component: a technician who wants to test a candidate folder before
          committing to it can run it by hand and read the sentence on stderr. -->
 
-    <!-- v5 includes a UI set with the WixUI element, which also sets
-         WIXUI_INSTALLDIR from InstallDirectory. The v3 pairing of UIRef plus a
-         WIXUI_INSTALLDIR property does not link: WixUI_InstallDir is a
-         protected symbol inside the extension, so referencing it as a UIRef
-         target from a package fails with "inaccessible due to its protection
-         level". UIRef still exists, but only for sequence references within a
-         fragment, which is how the extension refers to itself. -->
-    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <!-- FeatureTree is used for the dialog sequence, not for its feature page.
+         Unlike InstallDirDlg, the set contains no install-location page, so
+         there is no path in the wizard that can put the service in C:\Windows.
+         Its CustomizeDlg is skipped by the LicenseAgreementDlg Next override
+         below, which goes straight to the folder page. WixUI_InstallDir used to
+         provide the same sequence but kept InstallDirDlg compiled into the
+         package, and one technician did install the service into the system
+         directory from that page.
+
+         The v3 pairing of UIRef plus a WIXUI_INSTALLDIR property does not link:
+         WixUI_FeatureTree is a protected symbol inside the extension, so
+         referencing it as a UIRef target from a package fails with
+         "inaccessible due to its protection level". The ui:WixUI element is
+         what resolves the platform-specific dialog set. -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
 
     <!-- ================= protected folder prompt ================= -->
     <!--
@@ -594,25 +608,23 @@
       description says so rather than implying an answer arrives on this page,
       and validatepath.exe can be run by hand to test a path first.
 
-      This is the only folder the wizard asks for. WixUI_InstallDir normally
-      shows an install-location page before it, and a technician who typed
-      C:\Windows there got a LocalSystem service and three binaries loose in the
-      system directory from a package that refuses to back that directory up on
-      the very next page. The service binary has no reason to move, so the
-      install-location page is skipped: LicenseAgreementDlg goes straight to
-      this dialog, and Back returns there rather than to an install folder
-      prompt. INSTALLFOLDER still defaults to Program Files.
+      This is the only folder the wizard asks for. The dialog set has no
+      install-location page at all, so a technician cannot put the service in
+      C:\Windows and then have the next page refuse to back that directory up.
+      LicenseAgreementDlg goes straight here, and Back returns there. The
+      service binary has no reason to move; INSTALLFOLDER still defaults to
+      Program Files.
 
-      The custom publishes carry Order=5 so they run after WixUI_InstallDir's
-      built-in NewDialog publishes (Order=4 or lower) rather than losing to
-      them. The compiled ControlEvent table is dumped by the CI build, but the
-      final check is a human walking the wizard on a Windows host; see
+      The custom publishes carry Order=5 so they run after WixUI_FeatureTree's
+      built-in NewDialog publishes rather than losing to them. The compiled
+      ControlEvent table is dumped and asserted by the CI build, but the final
+      check is a human walking the wizard on a Windows host; see
       docs/OPERATIONS.md.
     -->
     <UI>
       <Dialog Id="BackupPathDlg" Width="370" Height="270" Title="Softafrique Backup Agent Setup">
         <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15"
-                 Transparent="no" NoPrefix="yes" Text="{\WixUI_Font_Title}Folder to protect" />
+                 Transparent="no" NoPrefix="yes" Text="{\WixUI_Font_Title}Softafrique Backup Agent Setup" />
         <Control Id="Description" Type="Text" X="25" Y="23" Width="324" Height="39"
                  Transparent="no" NoPrefix="yes"
                  Text="Enter the customer folder to protect. It is created if it does not exist, and it must be on a fixed disk." />
@@ -634,17 +646,18 @@
                  Default="yes" Text="Next">
           <!-- VerifyReadyDlg is the confirmation page. The sequence this
                package presents is Welcome, LicenseAgreement, Folder to protect,
-               VerifyReady, DiskCost; InstallDirDlg is intentionally skipped. An
-               earlier draft sent this to CostFinalize, which is not in the set
-               at all. -->
+               VerifyReady, DiskCost; CustomizeDlg is intentionally skipped, and
+               there is no install-location page in this dialog set. An earlier
+               draft sent this to CostFinalize, which is not in the set at all.
+               -->
           <Publish Event="NewDialog" Value="VerifyReadyDlg" />
         </Control>
       </Dialog>
 
       <!-- Take over the Next button on the license page so the folder page
-           follows it and InstallDirDlg is never shown. VerifyReadyDlg is where
-           WixUI_InstallDir would have gone after InstallDirDlg, so nothing
-           downstream of the sequence is lost. -->
+           follows it and FeatureTree's CustomizeDlg is never shown.
+           VerifyReadyDlg is where the built-in sequence would have gone after
+           CustomizeDlg, so nothing downstream is lost. -->
       <!-- The built-in LicenseAgreementDlg Next publishes NewDialog with a
            lower Order, and a custom publish without an Order used to tie and
            lose. A higher Order is what makes this the last NewDialog.

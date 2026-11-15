@@ -126,7 +126,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.30   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.31   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so
@@ -145,6 +145,12 @@ the customer PC needs nothing else installed.
 ```
 
 3. `status.json` is the machine-readable state. It contains no secrets.
+
+The MSI's **Change** is disabled in maintenance mode. The package has no
+independently selectable features, and the protected folder is changed from the
+dashboard rather than by reinstalling: the gateway's `backup_path` overrides the
+local `include` on the next `/config` poll. A support-directed local edit is the
+exception, and is described in `docs/OPERATIONS.md`.
 
 For a manual install, `agent enroll` reads the token from
 `SOFTAFRIQUE_ENROLL_TOKEN` or `-token-file` rather than `-token`, because a token

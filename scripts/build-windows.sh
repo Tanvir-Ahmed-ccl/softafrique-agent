@@ -12,7 +12,7 @@
 # Usage: scripts/build-windows.sh [version]
 set -euo pipefail
 
-VERSION="${1:-0.2.30}"
+VERSION="${1:-0.2.31}"
 RESTIC_VERSION="${RESTIC_VERSION:-0.19.1}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/build/bin"

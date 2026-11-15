@@ -229,10 +229,10 @@ Tactical RMM's own download step verifies the hash it was given.
 
 An interactive install shows a **Folder to protect** page after the license
 page, pre-filled with `C:\SoftafriqueBackup`, so a hand-typed `msiexec /i` does
-not silently protect an empty default folder. The install-location page is
-deliberately skipped: the service binary has no reason to live anywhere but
-Program Files, and two similar folder prompts in a row caused a technician to
-install the service into `C:\Windows`. The silent form sets the same value on the
+not silently protect an empty default folder. There is no install-location page
+in the wizard: the service binary has no reason to live anywhere but Program
+Files, and two similar folder prompts in a row caused a technician to install
+the service into `C:\Windows`. The silent form sets the same value on the
 command line:
 
 ```powershell
@@ -291,11 +291,13 @@ check a compiled-table assertion cannot provide.
   folder page, asking which folder to protect, so a hand-typed `msiexec /i` no
   longer silently protects an empty `C:\SoftafriqueBackup`. In 0.2.25 the page
   was compiled but never appeared: its `NewDialog` publish tied with the
-  built-in event, which ran later and won. The install-location page is now
-  skipped so the wizard does not ask for two folders in a row; a technician once
-  installed the service into `C:\Windows` from that page. The CI build reads the
-  compiled `ControlEvent` table and fails unless `BackupPathDlg` supersedes the
-  built-in `InstallDirDlg` event on `LicenseAgreementDlg`. It also reads the
+  built-in event, which ran later and won. The dialog set no longer contains an
+  install-location page, so the wizard asks exactly one folder question and a
+  technician cannot install the service into `C:\Windows` by accident. The CI
+  build reads the compiled `ControlEvent` table and fails unless
+  `BackupPathDlg` supersedes the built-in `CustomizeDlg` event on
+  `LicenseAgreementDlg`, and fails if any wizard event opens `InstallDirDlg`.
+  It also reads the
   compiled `InstallExecuteSequence` and fails unless `ValidateBackupFolder` runs
   before `WriteConfig`, because that order is what stops a refused folder being
   written. The CI job installs the MSI on every change with `BACKUPPATH` set

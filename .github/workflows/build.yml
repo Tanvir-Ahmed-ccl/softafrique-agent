@@ -320,12 +320,11 @@ jobs:
           Get-Content $out
 
           # The folder prompt was in 0.2.25 but never appeared: its NewDialog
-          # publish tied with a built-in event. It must now replace the
-          # install-location page, not follow it: a technician who typed
-          # C:\Windows into that page once got a LocalSystem service installed
-          # in the system directory by the same package that refuses to back
-          # that directory up on the next page. Assert the compiled ordering
-          # here, before a human walks the wizard again.
+          # publish tied with a built-in event. It must now replace the dialog
+          # set's intermediate page, not follow it. FeatureTree's intermediate
+          # page is CustomizeDlg; InstallDirDlg is not in that set at all, so no
+          # wizard path can install the service into C:\Windows. Assert both the
+          # ordering and the absence of an InstallDirDlg destination.
           $sql = 'SELECT `Argument`, `Ordering` FROM `ControlEvent` WHERE `Dialog_`=''LicenseAgreementDlg'' AND `Control_`=''Next'' AND `Event`=''NewDialog'''
           $db = $msi.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$msi,@($path,0))
           $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
@@ -340,13 +339,22 @@ jobs:
           if (-not $orders.ContainsKey('BackupPathDlg')) {
             throw "the compiled UI has no NewDialog event for BackupPathDlg"
           }
-          if (-not $orders.ContainsKey('InstallDirDlg')) {
-            throw "the compiled UI has no built-in InstallDirDlg event to supersede"
+          if (-not $orders.ContainsKey('CustomizeDlg')) {
+            throw "the compiled UI has no built-in CustomizeDlg event to supersede"
           }
-          if ($orders['BackupPathDlg'] -le $orders['InstallDirDlg']) {
-            throw "BackupPathDlg order $($orders['BackupPathDlg']) does not beat the built-in InstallDirDlg order $($orders['InstallDirDlg'])"
+          if ($orders['BackupPathDlg'] -le $orders['CustomizeDlg']) {
+            throw "BackupPathDlg order $($orders['BackupPathDlg']) does not beat the built-in CustomizeDlg order $($orders['CustomizeDlg'])"
           }
-          Write-Host "ok  the folder prompt replaces InstallDirDlg (order $($orders['BackupPathDlg']) > $($orders['InstallDirDlg']))"
+          Write-Host "ok  the folder prompt replaces CustomizeDlg (order $($orders['BackupPathDlg']) > $($orders['CustomizeDlg']))"
+
+          $sql = 'SELECT `Dialog_`, `Control_`, `Argument` FROM `ControlEvent` WHERE `Argument`=''InstallDirDlg'''
+          $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
+          $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
+          $rec = $view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+          if ($null -ne $rec) {
+            throw "the compiled UI still has a wizard event that opens InstallDirDlg"
+          }
+          Write-Host "ok  no wizard event opens an install-location page"
 
           # The 0.2.27 defect was sequencing: WriteConfig ran before
           # ValidateBackupFolder, so a path the installer was about to refuse

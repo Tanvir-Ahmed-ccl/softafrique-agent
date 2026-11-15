@@ -65,9 +65,11 @@ type RepoStats struct {
 	// RestoreBytes is the logical size of the latest snapshot as restored
 	// (restic stats --mode restore-size latest).
 	RestoreBytes uint64 `json:"restore_bytes"`
-	// FileCount is the number of protected files in the latest snapshot, from
-	// the restore-size reading. SnapshotCount comes from the whole-repository
-	// raw-data reading.
+	// FileCount is restic's node count for the latest snapshot, from the
+	// restore-size reading: files plus directories plus the snapshot root. The
+	// field name is kept for the status schema, but a customer-facing label
+	// must say entries rather than files. SnapshotCount comes from the
+	// whole-repository raw-data reading.
 	FileCount     uint64 `json:"file_count"`
 	SnapshotCount uint64 `json:"snapshot_count"`
 	// CapturedAt is when these numbers were read, so a dashboard can tell a
