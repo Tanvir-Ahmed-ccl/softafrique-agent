@@ -769,3 +769,17 @@ the install-location page and retitled the folder page, but none of that is
 exercised by a silent install. They should be checked on the next clean
 deployment. Maintenance-mode **Change** is intentionally disabled; the supported
 way to change the protected folder is the dashboard.
+
+## 10. 0.2.30: re-ship the fix under a version that upgrades
+
+The MSI tested for section 9 reported ProductVersion 0.2.28, the version already
+installed, so Windows ran it as a reinstall and never scheduled
+RemoveExistingProducts. The sequencing fix was present; the version was not, so
+the upgrade path could not be exercised.
+
+0.2.30 moves the version on from 0.2.29 and keeps the same installer fix. The
+release job now fails a tag unless the compiled MSI's ProductVersion matches the
+tag, the tag names the commit being built, and the version differs from the
+previous release. It also checks that the Makefile, `Product.wxs` and
+`build-windows.sh` all declare the tag's version, so a local `make msi` cannot
+quietly produce the old one.

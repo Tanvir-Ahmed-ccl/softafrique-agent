@@ -164,7 +164,21 @@ jobs:
     runs-on: windows-latest
     needs: [test, test-windows]
     steps:
+      # Full history and tags: the release check below compares this tag with
+      # the previous release, and a shallow checkout cannot see that tag.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Windows decides upgrade vs reinstall from ProductVersion. A tag that
+      # does not move the version, or source defaults that do not agree with the
+      # tag, both produce a package that never schedules RemoveExistingProducts.
+      - name: check the release version matches the tag and moved
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/check-version.sh "${GITHUB_REF_NAME#v}" --tag
 
       - uses: actions/setup-go@v5
         with:
@@ -246,6 +260,7 @@ jobs:
           if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
             VERSION="0.0.${GITHUB_RUN_NUMBER}"
           fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           wix build installer/Product.wxs -arch x64 \
             -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext \
             -d ProductVersion="${VERSION}" \
@@ -384,6 +399,36 @@ jobs:
             throw "RemoveExistingProducts ($($upgradeSeq['RemoveExistingProducts'])) must run after InstallFinalize ($($upgradeSeq['InstallFinalize'])), or a failed upgrade uninstalls the working agent"
           }
           Write-Host "ok  the old product is removed only after the new one installs (RemoveExistingProducts $($upgradeSeq['RemoveExistingProducts']) > InstallFinalize $($upgradeSeq['InstallFinalize']))"
+
+      # ProductVersion is what Windows uses to decide whether a package is an
+      # upgrade. A package carrying the installed version is treated as a
+      # reinstall, RemoveExistingProducts is skipped, and the upgrade path is
+      # never exercised. Read the compiled Property table rather than the value
+      # passed to WiX, so a stale artefact or a lost -d argument fails here.
+      - name: check the MSI version matches the tag
+        shell: pwsh
+        run: |
+          $msi = New-Object -ComObject WindowsInstaller.Installer
+          $path = (Resolve-Path 'SoftafriqueBackupAgent.msi').Path
+          $db = $msi.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$msi,@($path,0))
+          $sql = 'SELECT `Value` FROM `Property` WHERE `Property`=''ProductVersion'''
+          $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
+          $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
+          $rec = $view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
+          if ($null -eq $rec) { throw "the MSI has no ProductVersion property" }
+          $got = $rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,1)
+
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $want = $env:GITHUB_REF_NAME -replace '^v', ''
+            $source = "git tag $env:GITHUB_REF_NAME"
+          } else {
+            $want = $env:VERSION
+            $source = "the build version"
+          }
+          if ($got -ne $want) {
+            throw "MSI ProductVersion is '$got', but $source is '$want'"
+          }
+          Write-Host "ok  the MSI ProductVersion ($got) matches $source"
 
       - name: smoke test the MSI layout
         run: |
