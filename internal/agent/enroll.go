@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"softafrique-backup-agent/internal/api"
 	"softafrique-backup-agent/internal/identity"
@@ -144,12 +145,58 @@ func (a *Agent) probeCredentials(ctx context.Context, creds *secret.Credentials)
 	return nil
 }
 
+// withdrawTimeout is deliberately shorter than the client's default. A machine
+// being decommissioned often has no network, and an uninstall must not sit for
+// the full request timeout waiting for a gateway that will never answer.
+const withdrawTimeout = 10 * time.Second
+
+// Withdraw tells the gateway this device is being decommissioned. It has to be
+// called while credentials.dat still exists: the endpoint authenticates with the
+// device's own credentials, which local removal is about to delete.
+//
+// The call is best effort by design. A gateway that is unreachable, has already
+// archived the device, or refuses the credentials is logged and returned to the
+// caller, but is never a reason to fail an uninstall or to keep a key on a
+// decommissioned machine. Withdrawal only changes what the gateway accepts; it
+// cannot delete the repository, the escrowed key or any snapshot.
+func (a *Agent) Withdraw(ctx context.Context) (*api.WithdrawResponse, error) {
+	if err := a.load(); err != nil {
+		return nil, err
+	}
+	gw := a.gatewayClient()
+	if gw == nil {
+		return nil, ErrNotEnrolled
+	}
+	ctx, cancel := context.WithTimeout(ctx, withdrawTimeout)
+	defer cancel()
+
+	resp, err := gw.Withdraw(ctx)
+	if err != nil {
+		if errors.Is(err, api.ErrRevoked) {
+			a.log.Warn("the gateway reports this device is archived; it is already withdrawn", "err", err)
+		} else {
+			a.log.Warn("could not withdraw this device at the gateway; continuing with local removal", "err", err)
+		}
+		return nil, err
+	}
+	if resp == nil {
+		resp = &api.WithdrawResponse{}
+	}
+	a.log.Info("device withdrawn at the gateway",
+		"device_id", resp.DeviceID,
+		"status", resp.Status,
+		"already_withdrawn", resp.AlreadyWithdrawn,
+		"note", resp.Note)
+	return resp, nil
+}
+
 // Unenroll removes the credentials from this device.
 //
 // It is a local operation by design: it does not call the gateway and does not
 // touch the repository, so it can be run on a device with no network. Deleting
 // the key is the destructive part and it is not reversible from this machine,
-// which is why the CLI makes the operator confirm.
+// which is why the CLI makes the operator confirm. Withdrawal on uninstall is a
+// separate command precisely so this stays usable for re-enrollment.
 func (a *Agent) Unenroll() error {
 	if !a.secrets.Exists() {
 		return nil

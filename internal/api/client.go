@@ -177,6 +177,26 @@ func (c *Client) PostStatus(ctx context.Context, report StatusReport) error {
 	return c.do(ctx, http.MethodPost, "/status", report, nil, true)
 }
 
+// Withdraw tells the gateway this device is being decommissioned. The call is
+// authenticated with the device's own credentials, takes no request body and is
+// idempotent: a second call answers 200 again with AlreadyWithdrawn set. A 403
+// means the device was archived, which is already a withdrawn state as far as
+// the agent is concerned.
+//
+// Withdrawal only disables the device at the gateway. It cannot delete the
+// repository, the escrowed key or any snapshot, so an error here never has to
+// stop a local uninstall: the caller logs it and carries on.
+func (c *Client) Withdraw(ctx context.Context) (*WithdrawResponse, error) {
+	if !c.Authenticated() {
+		return nil, &Error{Op: "withdraw", Path: "/withdraw", Err: ErrUnauthorized, Body: "client has no device credentials"}
+	}
+	var out WithdrawResponse
+	if err := c.do(ctx, http.MethodPost, "/withdraw", nil, &out, true); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // Health probes the gateway. It is unauthenticated and is used by the RMM
 // scripts and `agent doctor`.
 func (c *Client) Health(ctx context.Context) error {
@@ -230,6 +250,13 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any, auth 
 		if out == nil {
 			return nil
 		}
+		// A 2xx with no body is still a successful call. Withdrawal treats its
+		// reply as informational, and Enroll/Config validate their own required
+		// fields before anything is applied, so an empty body cannot be mistaken
+		// for a usable reply.
+		if len(bytes.TrimSpace(raw)) == 0 {
+			return nil
+		}
 		if err := json.Unmarshal(raw, out); err != nil {
 			return &Error{Op: opName(path), Method: method, Path: path, StatusCode: resp.StatusCode,
 				Err: fmt.Errorf("invalid JSON in reply: %w", err), Body: snippet(raw)}
@@ -279,6 +306,8 @@ func opName(path string) string {
 		return "fetch config"
 	case "/status":
 		return "post status"
+	case "/withdraw":
+		return "withdraw"
 	case "/health":
 		return "health"
 	default:

@@ -1,7 +1,7 @@
 # Operations runbook
 
 Everything an on-call engineer or a support technician needs. Written for the
-0.2.0 release.
+0.2.x line, currently 0.2.32.
 
 ## Where things are
 
@@ -35,6 +35,21 @@ agent's local state: `status.json`, `remote.json`, `config.yaml`, `agent.log` an
 `restic-cache`. It leaves the customer's protected folder and the server-side
 repository untouched, so history survives an uninstall and reinstall.
 
+Before deleting `credentials.dat`, the uninstall calls `POST /withdraw` with the
+device's own credentials. That disables the device at the gateway and removes it
+from the repository's credential file, so restic calls start returning 401 at
+once. The repository, the escrowed key and every snapshot are retained. The call
+is idempotent and best effort: a machine with no network still uninstalls, with
+the failure recorded in `agent.log` and the RMM job output. If that happened,
+withdraw the device from the dashboard. To bring a withdrawn device back, an
+administrator must call the gateway's
+`/api/v1/admin/device/{device_id}/reenroll`; it is not something the agent can do
+to itself.
+
+`agent unenroll` does **not** withdraw: it is the first half of the documented
+re-enrollment path. Use `agent withdraw` explicitly if a device is being
+decommissioned without the MSI.
+
 `uninstall.ps1` captures the last status line in its job output first, then
 performs the same cleanup. Use `-KeepStatus` if a copy of `status.json` is needed
 for a ticket; it is written to `%TEMP%`, not back into the data directory. The
@@ -62,7 +77,7 @@ Get-Content "$env:ProgramData\SoftafriqueBackupAgent\status.json" -Raw | Convert
 | `last_duration_seconds` | Wall clock, including waiting for the network. This is what to quote a customer. |
 | `restic_duration_seconds` | restic's own number. Never quote this as the backup duration. |
 | `consecutive_failures` | Drives the "failing" alert. |
-| `repo_stats.restore_bytes` / `repo_stats.file_count` | Restore size and restic's `total_file_count` for the **latest snapshot**. restic counts directories as nodes, so `file_count` is entries (files plus directories plus the snapshot root), not a pure file count. Do not label it "files protected" without accounting for that. |
+| `repo_stats.restore_bytes` / `repo_stats.file_count` | Restore size and restic's `total_file_count` for the **latest snapshot**. restic counts directories as nodes, so `file_count` is items (files plus directories plus the snapshot root), not a pure file count. The dashboard should label it "items", not "files" or "files protected". |
 | `repo_stats.repo_bytes` | Raw space the whole repository occupies, including history. |
 | `repo_stats.captured_at` | When the usage numbers were read, so a stale figure is distinguishable. |
 | `schedule_interval_seconds` | The effective interval after any gateway override. Use it for staleness thresholds. |
@@ -139,8 +154,8 @@ is deliberately not retried. Get a new one-time token from the dashboard and run
 
 `last_attempt_status` is `recreated`. Someone deleted the folder the device was
 asked to protect, and the agent recreated it rather than failing every hour
-forever. The run that followed captured an **empty directory**, so the device is
-running and reporting but protecting nothing.
+forever. The run that followed deliberately took **no snapshot**, because an
+empty directory protects nothing; the device is running but not protected.
 
 This needs a site visit: confirm the customer's data is actually in the path named
 in `action_required`. If it is not, they moved or lost it, and the snapshots
@@ -209,21 +224,28 @@ directory.
 
 ## Signing
 
-The pilot ships unsigned. Before GA, on a machine with the Softafrique code
-signing certificate:
+The current pilot ships unsigned while the certificate secrets are absent. Before GA, configure the code signing
+certificate in CI with these repository secrets:
 
-```powershell
-signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-  /f softafrique-code-signing.pfx /p $env:CERT_PASSWORD `
-  "SoftafriqueBackupAgent.msi" `
-  "SoftafriqueBackupAgent.exe" "restic.exe" "validatepath.exe"
-signtool verify /pa /v SoftafriqueBackupAgent.msi
-```
+* `SOFTAFRIQUE_SIGNING_PFX_BASE64`: the PFX file, base64-encoded.
+* `SOFTAFRIQUE_SIGNING_PFX_PASSWORD`: the PFX password.
 
-Sign the MSI and all three exes. An MSI whose payload is unsigned will install on
-a pilot machine and fail on anything with SmartScreen or AppLocker enforced,
-which is most managed estates. Re-test the RMM deployment after signing, because
-Tactical RMM's own download step verifies the hash it was given.
+On a tag build, `scripts/sign-windows.ps1` signs
+`SoftafriqueBackupAgent.exe` and `validatepath.exe` before the MSI is built,
+then signs the MSI and runs `signtool verify /pa` on each file. The install
+smoke test runs after signing, so the signed package is installed as well as
+verified. While the secrets are absent the step prints a skip and the build
+remains unsigned. If you publish a signed MSI, compute its SHA256 **after**
+signing; the signature changes the hash.
+
+The script does **not** re-sign `restic.exe`. That is third-party code, and
+signing it with Softafrique's certificate would assert authorship of a binary
+Softafrique did not build.
+
+An MSI whose payload is unsigned will install on a pilot machine and fail on
+anything with SmartScreen or AppLocker enforced, which is most managed estates.
+Re-test the RMM deployment after signing, because Tactical RMM's own download
+step verifies the hash it was given.
 
 ## Manual install (no RMM)
 
@@ -275,7 +297,7 @@ real install with a trailing separator on `BACKUPPATH`, asserts the service is
 running, checks the rendered `include` value, and then uninstalls. That is the
 check a compiled-table assertion cannot provide.
 
-## What is not automated yet
+## What still needs a human or a server-side decision
 
 * **Retention.** The gateway is append-only and the agent has no `forget` or
   `prune` code path. Until a retention job exists, storage grows without bound.
@@ -287,25 +309,10 @@ check a compiled-table assertion cannot provide.
 * **Certificate-based TLS pinning.** Go enforces TLS 1.2 minimum. There is no
   pin, so a machine trusting a rogue CA could be intercepted. Deferred until
   mohsin decides whether the gateway will publish a stable certificate chain.
-* **The protected-folder prompt in the MSI.** The installer shows exactly one
-  folder page, asking which folder to protect, so a hand-typed `msiexec /i` no
-  longer silently protects an empty `C:\SoftafriqueBackup`. In 0.2.25 the page
-  was compiled but never appeared: its `NewDialog` publish tied with the
-  built-in event, which ran later and won. The dialog set no longer contains an
-  install-location page, so the wizard asks exactly one folder question and a
-  technician cannot install the service into `C:\Windows` by accident. The CI
-  build reads the compiled `ControlEvent` table and fails unless
-  `BackupPathDlg` supersedes the built-in `CustomizeDlg` event on
-  `LicenseAgreementDlg`, and fails if any wizard event opens `InstallDirDlg`.
-  It also reads the
-  compiled `InstallExecuteSequence` and fails unless `ValidateBackupFolder` runs
-  before `WriteConfig`, because that order is what stops a refused folder being
-  written. The CI job installs the MSI on every change with `BACKUPPATH` set
-  (including a trailing separator), then with a refused path and immediately
-  with a good one to prove the refused attempt left nothing behind, asserts the
-  service exists and is running, and uninstalls it again. A human still has to
-  walk the wizard on a Windows host before release; see
-  [`JOINT-SESSION.md`](JOINT-SESSION.md). The RMM path does not use the UI:
+* **A human walk-through of the installer.** CI installs, repairs and uninstalls
+  the MSI, asserts the compiled UI tables, and proves the folder checks hold, but
+  a person still has to walk the wizard on a real Windows host before release;
+  see [`JOINT-SESSION.md`](JOINT-SESSION.md). The RMM path does not use the UI:
   `install.ps1` prompts for `-BackupPath` in PowerShell and installs with `/qn`.
 * **The fixed-disk check, on a real machine.** The policy is confirmed: fixed
   disks only, a network share refused unless somebody opted in, and optical or

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <?ifndef ProductVersion ?>
-<?define ProductVersion="0.2.31" ?>
+<?define ProductVersion="0.2.32" ?>
 <?endif ?>
 <!--
   Softafrique Backup Agent, WiX v5 (toolset-only: WixToolset.UI and
@@ -332,6 +332,16 @@
          CustomActionData, and WixQuietExec reads CustomActionData in
          preference to WixQuietExec64CmdLine. Naming them anything else, as an
          earlier draft did, silently handed the action an empty command line. -->
+    <!-- Tell the gateway before the credentials go. /withdraw authenticates with
+         the device's own credentials, so it has to run while credentials.dat is
+         still on disk. The command is best effort: it logs a gateway failure and
+         still exits 0, and Return="ignore" keeps an offline machine's uninstall
+         from failing here. A major upgrade skips this along with the credentials
+         removal it precedes. -->
+    <SetProperty Id="WithdrawDevice"
+                 Value="&quot;[INSTALLFOLDER]SoftafriqueBackupAgent.exe&quot; withdraw -config &quot;[DATAFOLDER]config.yaml&quot;"
+                 Before="WithdrawDevice" Sequence="execute" />
+
     <!-- A standalone uninstall deletes the sealed repository key, because
          leaving credentials.dat behind on a decommissioned or reimaged machine
          is exactly the boundary the directory ACL exists to protect. The
@@ -435,6 +445,13 @@
           above. An action given neither arrives with an empty command line and
           succeeds at nothing, which is the quietest possible failure.
     -->
+    <CustomAction Id="WithdrawDevice"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixQuietExec64"
+                  Execute="deferred"
+                  Return="ignore"
+                  Impersonate="no" />
+
     <CustomAction Id="RemoveCredentials"
                   BinaryRef="Wix4UtilCA_X64"
                   DllEntry="WixQuietExec64"
@@ -501,8 +518,13 @@
            UPGRADINGPRODUCTCODE on the outgoing product's uninstall, so the
            condition keeps credentials during an upgrade and deletes them only
            on a genuine uninstall. -->
-      <Custom Action="RemoveCredentials" After="StopServices"
-              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="WithdrawDevice" After="StopServices"
+               Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+
+      <!-- The withdrawal above must finish while credentials.dat still exists;
+           this is the step that deletes it. -->
+      <Custom Action="RemoveCredentials" After="WithdrawDevice"
+               Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
 
       <!-- Same conditions as RemoveCredentials: a real uninstall, never the
            outgoing half of a major upgrade. The credentials action has already
@@ -624,7 +646,7 @@
     <UI>
       <Dialog Id="BackupPathDlg" Width="370" Height="270" Title="Softafrique Backup Agent Setup">
         <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="15"
-                 Transparent="no" NoPrefix="yes" Text="{\WixUI_Font_Title}Softafrique Backup Agent Setup" />
+                 Transparent="no" NoPrefix="yes" Text="{\WixUI_Font_Title}Folder to protect" />
         <Control Id="Description" Type="Text" X="25" Y="23" Width="324" Height="39"
                  Transparent="no" NoPrefix="yes"
                  Text="Enter the customer folder to protect. It is created if it does not exist, and it must be on a fixed disk." />

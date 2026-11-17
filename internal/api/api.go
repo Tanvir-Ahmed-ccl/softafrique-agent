@@ -2,13 +2,16 @@
 //
 //	Base URL: https://backup.softafrique.net/api/v1
 //
-//	POST /enroll   no auth, one-time token
-//	GET  /config   HTTP basic (device_id / device_password)
-//	POST /status   HTTP basic (device_id / device_password)
-//	GET  /health   no auth
+//	POST /enroll    no auth, one-time token
+//	GET  /config    HTTP basic (device_id / device_password)
+//	POST /status    HTTP basic (device_id / device_password)
+//	POST /withdraw  HTTP basic, called at uninstall
+//	GET  /health    no auth
 //
 // The gateway is append-only: this package exposes no method that could delete
 // or expire a snapshot, and the agent never calls restic's forget or prune.
+// Withdrawal only disables the device's gateway credentials; the repository,
+// the escrowed key and every snapshot stay on the server.
 package api
 
 import (
@@ -83,6 +86,16 @@ func (r *EnrollResponse) RedactedForLog() EnrollResponse {
 		out.EncryptionKey = "[redacted]"
 	}
 	return out
+}
+
+// WithdrawResponse is the POST /withdraw reply. It is informational: a 2xx is
+// what confirms the withdrawal, so a reply missing these fields is not refused.
+// The note is written to the agent log for whoever reads the uninstall report.
+type WithdrawResponse struct {
+	DeviceID         string `json:"device_id"`
+	Status           string `json:"status"`
+	AlreadyWithdrawn bool   `json:"already_withdrawn"`
+	Note             string `json:"note"`
 }
 
 // DeviceState is the gateway's view of whether a device may back up.

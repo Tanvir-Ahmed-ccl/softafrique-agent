@@ -28,15 +28,17 @@ vocabulary is wrong, and the fix is one line.
 
 ### 2. There is no `POST /heartbeat` endpoint.
 
-The agent has four endpoints: `/enroll`, `/config`, `/status`, `/health`.
+The agent has five endpoints: `/enroll`, `/config`, `/status`, `/withdraw`,
+`/health`.
 
 "Heartbeat" is an internal *cadence*, not an endpoint. The agent re-posts
-`POST /status` with the last-known state every `status_heartbeat` (default 6
-hours) while idle, and after every attempt.
+`POST /status` with the last-known state every `status_heartbeat` (15 minutes in
+the shipped config; 6 hours only if the setting is absent) while idle, and after
+every attempt.
 
 **Confirmed: point dashboard liveness at `POST /status`.** Every device reports
-after every attempt and at least every 6 hours, so liveness can be keyed off it
-directly. This was the item most likely to have made the pilot look like a total
+after every attempt and at least every `status_heartbeat`, so liveness can be
+keyed off it directly. This was the item most likely to have made the pilot look like a total
 failure — a dashboard hung off a `/heartbeat` route would have read every device
 as offline while the backups were in fact succeeding. No `/heartbeat` endpoint
 will be added; there is nothing for it to do that `POST /status` is not already
@@ -52,20 +54,23 @@ dashboard and hands it to the agent as a file:
 SoftafriqueBackupAgent.exe reimport \
   -key-file C:\Temp\key.txt \
   -device-password-file C:\Temp\pass.txt \
+  -device-id dev-01HQ8K2M4P \
   -config "%ProgramData%\SoftafriqueBackupAgent\config.yaml"
 ```
 
-Both files are required, and the repository comes from the **local config**, not
-from the gateway — re-import exists for the case where the gateway cannot be
-reached, so asking it would defeat the purpose.
+Both secret files are required, and so is the device id: pass `-device-id` or set
+`device_id` in the config, because the sealed blob that normally holds it is gone
+after a reimage. The repository comes from the **local config**, not from the
+gateway — re-import exists for the case where the gateway cannot be reached, so
+asking it would defeat the purpose.
 
 **What proves the device is entitled to the escrowed key: nothing, at the
 protocol level.** There is no challenge and no signature. Entitlement is proven
 afterwards, by the repository refusing to open with the wrong key. That is a
 deliberate decision, documented in
-[`OPERATIONS.md`](OPERATIONS.md#what-is-not-automated-yet), but it does mean a
-human's hands transit the key. It is why `reimport` is not in the RMM scripts
-and requires `-yes`.
+[`OPERATIONS.md`](OPERATIONS.md#what-still-needs-a-human-or-a-server-side-decision),
+but it does mean a human's hands transit the key. It is why `reimport` is not
+automated by the RMM scripts.
 
 ---
 
@@ -101,15 +106,15 @@ stop.
 
 ### Status code map
 
-| Code | `/enroll` | `/config` and `/status` |
-| --- | --- | --- |
-| `2xx` | credentials issued | device may back up |
-| `400` | rejected; message shown to the technician | counted as a config failure; last config kept |
-| `401` | **avoid** — see below | device marked **revoked** |
-| `403` | **token invalid, expired or spent** | **device marked revoked** (`revoked` and `archived` both) |
-| `404` | rejected | counted as a config failure |
-| `409` | **already enrolled** | rejected |
-| `5xx` | retried later | **last config kept, backups continue** |
+| Code | `/enroll` | `/config` and `/status` | `/withdraw` |
+| --- | --- | --- | --- |
+| `2xx` | credentials issued | device may back up | withdrawn; local uninstall continues |
+| `400` | rejected; message shown to the technician | counted as a config failure; last config kept | logged; local uninstall continues |
+| `401` | **avoid** — see below | device marked **revoked** | logged; local uninstall continues |
+| `403` | **token invalid, expired or spent** | **device marked revoked** (`revoked` and `archived` both) | already archived; logged, local uninstall continues |
+| `404` | rejected | counted as a config failure | logged; local uninstall continues |
+| `409` | **already enrolled** | rejected | not expected |
+| `5xx` | retried later | **last config kept, backups continue** | logged; local uninstall continues |
 
 All of this is now confirmed. Two consequences worth writing down:
 
@@ -135,7 +140,7 @@ All of this is now confirmed. Two consequences worth writing down:
   "hostname": "DESKTOP-ABC",
   "os_caption": "Windows Server 2019 Standard",
   "backup_path": "D:\\CustomerData",
-  "agent_version": "0.2.0"
+  "agent_version": "0.2.32"
 }
 ```
 
@@ -265,7 +270,7 @@ Sent after every completed attempt, and on the heartbeat timer.
   "bytes_added": 734003200,
   "last_duration_seconds": 41.2,
   "last_backup_error": "",
-  "agent_version": "0.2.0",
+  "agent_version": "0.2.32",
   "os_caption": "Windows Server 2019 Standard"
 }
 ```
@@ -311,6 +316,49 @@ network. restic's own duration is not in this contract; it is in `status.json` a
 `restic_duration_seconds`.
 
 The agent reads no response body, so any 2xx works.
+
+### `POST /withdraw` — HTTP basic, at uninstall
+
+Called by the MSI uninstall and by `scripts/rmm/uninstall.ps1` **before**
+`credentials.dat` is deleted, because the endpoint authenticates with the
+device's own credentials. No request body.
+
+```json
+{
+  "device_id": "trubonded-fileserver01",
+  "status": "withdrawn",
+  "already_withdrawn": false,
+  "note": "credentials disabled; snapshots and the escrowed key are retained"
+}
+```
+
+A repeat call answers `200` again with `already_withdrawn: true`. The agent
+treats any 2xx as success and does not require these fields: the reply is for the
+uninstall log, not for control flow.
+
+| Code | Meaning to the agent |
+| --- | --- |
+| `200` | withdrawn (possibly already); logged and the local uninstall proceeds |
+| `401` | credentials refused; logged, local uninstall still proceeds |
+| `403` | device archived, which is already withdrawn; logged as such |
+| `5xx` / transport | gateway unreachable; logged, local uninstall still proceeds |
+
+**No error from this endpoint fails an uninstall.** A decommissioned machine
+often has no network. The call has a 10-second timeout, its outcome is written to
+`agent.log` and to the RMM job output, and local key deletion happens either way.
+Only the local removal protects the machine; withdrawal just tells the dashboard.
+
+**What it cannot do:** delete the repository, the escrowed key or any snapshot.
+A device can only disable itself. A compromised uninstall path can therefore stop
+future backups, which the dashboard shows, but cannot destroy a customer's
+history. To bring a withdrawn device back, use the gateway's admin
+`/api/v1/admin/device/{device_id}/reenroll`, which clears the withdrawal and
+reopens enrollment; that is an operator action, not an agent one.
+
+`agent unenroll` deliberately does **not** call this endpoint: it is also the
+first half of re-enrollment, and withdrawing there would make the documented
+unenroll → enroll sequence fail without an admin. Run `agent withdraw` first only
+when the device really is being decommissioned.
 
 ### `GET /health` — no auth
 

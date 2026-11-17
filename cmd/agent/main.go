@@ -124,6 +124,8 @@ func run(args []string) int {
 		err = cmdEnroll(rest)
 	case "unenroll":
 		err = cmdUnenroll(rest)
+	case "withdraw":
+		err = cmdWithdraw(rest)
 	case "reimport":
 		err = cmdReimport(rest)
 	case "run":
@@ -613,6 +615,42 @@ func cmdUnenroll(args []string) error {
 		return err
 	}
 	fmt.Println("credentials deleted from this device; the repository and its snapshots are untouched")
+	return nil
+}
+
+// cmdWithdraw tells the gateway this device is being decommissioned. It is the
+// install/uninstall counterpart of enroll and is deliberately best effort: a
+// decommissioned machine often has no network, and a gateway that cannot be
+// reached must neither leave a key behind nor fail the uninstall. The outcome is
+// logged and printed for the RMM job; a gateway failure is not an error here.
+//
+// It is a separate command from unenroll on purpose. Unenroll is also the first
+// half of re-enrollment, and that must not withdraw the device at the gateway.
+func cmdWithdraw(args []string) error {
+	env, err := openEnv(args, true, nil)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signalCtx()
+	defer stop()
+
+	resp, err := newAgent(env).Withdraw(ctx)
+	switch {
+	case err == nil:
+		note := resp.Note
+		if note == "" {
+			note = "the gateway has withdrawn this device"
+		}
+		fmt.Printf("withdrawn at the gateway: %s\n", note)
+		if resp.AlreadyWithdrawn {
+			fmt.Println("  the device had already been withdrawn")
+		}
+	case isNotEnrolled(err):
+		fmt.Println("no stored credentials; nothing to withdraw at the gateway")
+	default:
+		fmt.Fprintf(os.Stderr, "warning: could not withdraw at the gateway: %v\n", err)
+		fmt.Fprintln(os.Stderr, "continuing with local removal; the device can also be withdrawn from the dashboard")
+	}
 	return nil
 }
 
@@ -1120,6 +1158,8 @@ Usage:
 Setup:
   enroll      Exchange a one-time token for this device's credentials.
   unenroll    Delete the credentials from this device (local only).
+  withdraw    Tell the gateway the device is being decommissioned (best effort,
+              used by uninstall while the credentials still exist).
   reimport    Rebuild the credentials from an escrowed key after a reimage.
 
 Running:

@@ -21,11 +21,13 @@ import (
 
 // fakeGateway is a scripted gateway.
 type fakeGateway struct {
-	config    *api.RemoteConfig
-	configErr error
-	reports   []api.StatusReport
-	reportErr error
-	healthErr error
+	config      *api.RemoteConfig
+	configErr   error
+	reports     []api.StatusReport
+	reportErr   error
+	withdrawErr error
+	withdrawn   int
+	healthErr   error
 }
 
 func (f *fakeGateway) Config(context.Context) (*api.RemoteConfig, error) {
@@ -41,6 +43,18 @@ func (f *fakeGateway) Config(context.Context) (*api.RemoteConfig, error) {
 func (f *fakeGateway) PostStatus(_ context.Context, r api.StatusReport) error {
 	f.reports = append(f.reports, r)
 	return f.reportErr
+}
+
+func (f *fakeGateway) Withdraw(context.Context) (*api.WithdrawResponse, error) {
+	f.withdrawn++
+	if f.withdrawErr != nil {
+		return nil, f.withdrawErr
+	}
+	return &api.WithdrawResponse{
+		DeviceID: "dev-01HQ8",
+		Status:   "withdrawn",
+		Note:     "credentials disabled; snapshots and the escrowed key are retained",
+	}, nil
 }
 
 func (f *fakeGateway) Health(context.Context) error { return f.healthErr }
@@ -649,5 +663,75 @@ func TestHeartbeatDoesNotClaimSuccessWhileSuspended(t *testing.T) {
 	}
 	if !strings.Contains(rep.LastBackupError, "suspended") {
 		t.Errorf("heartbeat error = %q, want the suspension reason", rep.LastBackupError)
+	}
+}
+
+// Withdrawal has to happen before the key is deleted, and it must leave the key
+// in place so the local uninstall can still remove it.
+func TestWithdrawLeavesCredentialsForTheLocalRemoval(t *testing.T) {
+	gw := &fakeGateway{}
+	a := newTestAgent(t, gw, &fakeRestic{})
+	enrollTest(t, a)
+
+	resp, err := a.Withdraw(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "withdrawn" || resp.DeviceID != "dev-01HQ8" {
+		t.Errorf("withdraw reply = %+v", resp)
+	}
+	if gw.withdrawn != 1 {
+		t.Errorf("made %d withdraw calls, want 1", gw.withdrawn)
+	}
+	if !a.secrets.Exists() {
+		t.Error("withdrawing must not delete the local credentials")
+	}
+}
+
+// An unreachable gateway is the normal case on a decommissioned machine. The
+// agent reports the failure but leaves local removal entirely to the caller.
+func TestWithdrawFailureDoesNotBlockLocalRemoval(t *testing.T) {
+	gw := &fakeGateway{withdrawErr: &api.Error{Op: "withdraw", Err: api.ErrUnavailable}}
+	a := newTestAgent(t, gw, &fakeRestic{})
+	enrollTest(t, a)
+
+	if _, err := a.Withdraw(context.Background()); !errors.Is(err, api.ErrUnavailable) {
+		t.Fatalf("want the gateway failure to be visible to the caller, got %v", err)
+	}
+	if !a.secrets.Exists() {
+		t.Fatal("a failed withdrawal must not delete the credentials")
+	}
+	if err := a.Unenroll(); err != nil {
+		t.Fatalf("local removal must still work: %v", err)
+	}
+	if a.secrets.Exists() {
+		t.Error("local removal did not delete the credentials")
+	}
+}
+
+// Unenroll is also how a device prepares for re-enrollment, so it must not
+// withdraw the device at the gateway. That is the uninstall's job.
+func TestUnenrollDoesNotWithdraw(t *testing.T) {
+	gw := &fakeGateway{}
+	a := newTestAgent(t, gw, &fakeRestic{})
+	enrollTest(t, a)
+
+	if err := a.Unenroll(); err != nil {
+		t.Fatal(err)
+	}
+	if gw.withdrawn != 0 {
+		t.Error("unenroll must stay local so the unenroll → enroll path still works")
+	}
+}
+
+func TestWithdrawOnUnenrolledDeviceDoesNotCallGateway(t *testing.T) {
+	gw := &fakeGateway{}
+	a := newTestAgent(t, gw, &fakeRestic{})
+
+	if _, err := a.Withdraw(context.Background()); !errors.Is(err, ErrNotEnrolled) {
+		t.Fatalf("want ErrNotEnrolled, got %v", err)
+	}
+	if gw.withdrawn != 0 {
+		t.Error("an unenrolled device has no credentials to withdraw")
 	}
 }

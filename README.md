@@ -5,12 +5,12 @@ A Windows service that backs up a customer's folders to an append-only
 them with a key escrowed by our gateway, and reports every attempt back to the
 dashboard.
 
-This is version 0.2.0. It replaces 0.1.0, which could not be pointed at a real
-customer safely: it took the repository password as a command-line argument, it
-wrote a second copy of that password into `status.json`, it ran `restic init`
-after any failure to list snapshots, and it reported a run that had never
-happened as a success. Those are fixed here, and each fix has a test named after
-the failure it prevents.
+This is the 0.2.x line, currently 0.2.32. It replaces 0.1.0, which could not be
+pointed at a real customer safely: it took the repository password as a
+command-line argument, it wrote a second copy of that password into
+`status.json`, it ran `restic init` after any failure to list snapshots, and it
+reported a run that had never happened as a success. Those are fixed here, and
+each fix has a test named after the failure it prevents.
 
 ## How a device is set up
 
@@ -103,7 +103,7 @@ during an incident without stopping the customer's backup service.
 
 | Path | What lives there |
 | --- | --- |
-| `cmd/agent` | The CLI: `enroll`, `unenroll`, `reimport`, `run`, `service`, `backup`, `selftest`, `status`, `snapshots`, `restore` |
+| `cmd/agent` | The CLI: `enroll`, `unenroll`, `withdraw`, `reimport`, `run`, `service`, `backup`, `selftest`, `status`, `snapshots`, `restore` |
 | `cmd/validatepath` | Small native helper the MSI calls to validate `BACKUPPATH` |
 | `internal/agent` | Orchestration: enrollment, config sync, status reporting, suspension, 0.1.0 migration |
 | `internal/api` | Gateway client: enroll, config, status, health, error classification |
@@ -126,7 +126,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.31   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.32   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so

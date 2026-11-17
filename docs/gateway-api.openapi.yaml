@@ -20,9 +20,9 @@ openapi: 3.1.0
 info:
   title: Softafrique Backup Gateway API
   version: "0.2.0"
-  summary: The four calls the backup agent makes.
+  summary: The five calls the backup agent makes.
   description: |
-    Implemented by the agent in `internal/api`. There are four endpoints and no
+    Implemented by the agent in `internal/api`. There are five endpoints and no
     more. In particular there is **no `POST /heartbeat`**: the agent's heartbeat
     posts to `POST /status` on a timer, and **liveness is confirmed to be read
     from `POST /status`** — every device reports after every attempt and at least
@@ -322,6 +322,49 @@ paths:
         '5XX':
           $ref: '#/components/responses/Unavailable'
 
+  /withdraw:
+    post:
+      tags: [operation]
+      operationId: withdraw
+      summary: Withdraw this device at uninstall. Authenticated, no request body.
+      description: |
+        Called by the MSI uninstall and by `scripts/rmm/uninstall.ps1` **before**
+        `credentials.dat` is deleted, because the call uses the device's own
+        credentials. Idempotent: a repeat call answers 200 again with
+        `already_withdrawn` set.
+
+        Withdrawal disables the device at the gateway; it cannot delete the
+        repository, the escrowed key or any snapshot. A device can only disable
+        itself, so the worst a compromised endpoint can do is stop future
+        backups, which the dashboard shows. Reactivating is an admin action at
+        `/api/v1/admin/device/{device_id}/reenroll`.
+
+        **No failure of this call fails an uninstall.** A decommissioned machine
+        is often offline. The agent gives it 10 seconds, logs the outcome and
+        deletes the local key regardless.
+      security:
+        - basicAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      responses:
+        '200':
+          description: The device is withdrawn, whether or not it already was.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WithdrawResponse'
+        '401':
+          description: |
+            Bad credentials. Logged; the local uninstall still proceeds.
+        '403':
+          description: |
+            The device is archived, which is already withdrawn. Logged as such;
+            the local uninstall still proceeds.
+        '5XX':
+          description: |
+            Gateway unavailable. Logged; the local uninstall still proceeds.
+            Never use a 5xx to mean "suspend this device".
+
   /health:
     get:
       tags: [operation]
@@ -497,6 +540,27 @@ components:
             Optional. Overrides the `backup_path` the agent sent. If you omit it,
             the agent keeps the value from the request.
           example: 'D:\CustomerData'
+
+    WithdrawResponse:
+      type: object
+      additionalProperties: true
+      description: |
+        Informational only. The agent treats any 2xx as a successful withdrawal
+        and does not require these fields, so omitting one is not a failure.
+      properties:
+        device_id:
+          type: string
+          example: trubonded-fileserver01
+        status:
+          type: string
+          example: withdrawn
+        already_withdrawn:
+          type: boolean
+          description: True on every repeat call; the endpoint is idempotent.
+        note:
+          type: string
+          description: Written to the agent log for the uninstall report.
+          example: credentials disabled; snapshots and the escrowed key are retained
 
     RemoteConfig:
       type: object

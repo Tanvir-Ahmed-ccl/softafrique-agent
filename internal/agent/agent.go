@@ -43,6 +43,7 @@ var deviceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 type gateway interface {
 	Config(ctx context.Context) (*api.RemoteConfig, error)
 	PostStatus(ctx context.Context, report api.StatusReport) error
+	Withdraw(ctx context.Context) (*api.WithdrawResponse, error)
 	Health(ctx context.Context) error
 }
 

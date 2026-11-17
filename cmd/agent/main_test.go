@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,8 @@ import (
 	"testing"
 
 	"softafrique-backup-agent/internal/agent"
+	"softafrique-backup-agent/internal/config"
+	"softafrique-backup-agent/internal/secret"
 	"softafrique-backup-agent/internal/status"
 )
 
@@ -136,6 +140,69 @@ func TestUnenrollForceDeletesAnUnreadableBlob(t *testing.T) {
 	}
 	if _, err := os.Stat(creds); !os.IsNotExist(err) {
 		t.Fatalf("credentials still exist after force unenroll: %v", err)
+	}
+}
+
+// A gateway error is the normal case on a machine being decommissioned offline.
+// It must be visible in the job output but must not fail the uninstall or delete
+// the key before the local removal step gets to it.
+func TestWithdrawNeverFailsTheUninstallWhenTheGatewayErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/withdraw" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := fmt.Sprintf("server: %q\ndata_dir: %q\nstatus_file: %q\nlog_file: %q\ninclude:\n  - %q\n",
+		srv.URL, dir, filepath.Join(dir, "status.json"), filepath.Join(dir, "agent.log"), dir)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(cfgPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := &secret.Credentials{
+		DeviceID:       "dev-01HQ8",
+		DevicePassword: "device-pass",
+		EncryptionKey:  "encryption-key",
+		Repository:     "rest:https://backup.softafrique.net/dev-01HQ8",
+		Server:         srv.URL,
+		EnrolledAt:     status.Now(),
+	}
+	if err := creds.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := loaded.SecretStore().Save(creds); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cmdWithdraw([]string{"-config", cfgPath}); err != nil {
+		t.Fatalf("a gateway error must not fail the uninstall: %v", err)
+	}
+	if !loaded.SecretStore().Exists() {
+		t.Error("withdraw deleted the local key; it is needed by the uninstall that follows")
+	}
+}
+
+// An unreadable blob is expected on an older or partially uninstalled machine.
+// Withdrawal is best effort there too: the local removal still has to run.
+func TestWithdrawDoesNotFailOnAnUnreadableBlob(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := fmt.Sprintf("server: https://backup.softafrique.net/api/v1\ndata_dir: %q\n", dir)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.dat"), []byte("not a DPAPI blob"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdWithdraw([]string{"-config", cfgPath}); err != nil {
+		t.Fatalf("withdraw must not fail on an unreadable blob: %v", err)
 	}
 }
 

@@ -798,6 +798,77 @@ from the dashboard. The custom page's title bar and heading both read
 
 On `file_count`: it is restic's node count, so 8 for four files, three
 subfolders and the snapshot root is intended by restic but is not a pure file
-count. The field stays as-is for schema compatibility and should be labelled
-"entries" wherever it is shown. A true file-only count would need a full
+count. The field stays as-is for schema compatibility and the dashboard should
+label it "items", as you suggested. A true file-only count would need a full
 `restic ls latest` walk on every stats refresh; say if you want that cost.
+
+## 12. Withdrawal endpoint: implemented as specified
+
+The endpoint you described closes the gap we had written up as "not on the wire
+yet". The agent now calls `POST /withdraw` from the MSI uninstall and from
+`uninstall.ps1`, before `credentials.dat` is deleted, with a 10-second timeout
+and HTTP Basic using the device's own credentials. A 2xx, a 401, a 403 and an
+unreachable gateway are all logged; none of them fails the uninstall or keeps a
+key on the machine. The reply's `already_withdrawn` and `note` go into the log
+and the RMM job output.
+
+Two deliberate choices on our side:
+
+1. `agent unenroll` does **not** call it. That command is also the first half of
+   re-enrollment, and withdrawing there would make the documented unenroll →
+   enroll sequence fail without your admin reenroll call. `agent withdraw` is a
+   separate command for decommissioning.
+2. The MSI action uses `Return="ignore"`, and CI now asserts in the compiled
+   `InstallExecuteSequence` that `WithdrawDevice` sorts before
+   `RemoveCredentials`. The call being best effort must not make the ordering
+   accidental: after the key is gone, the gateway cannot authenticate it.
+
+Nothing here tries to remove a repository, a key or a snapshot. That boundary is
+yours and we have not added a code path that crosses it. The rest-server
+credential-refresh bug you found explains the 401 during enrollment testing; we
+have not worked around it agent-side, because the fix belongs where the
+credential file is reloaded.
+
+## 13. 0.2.32: the six sections, the two small items and the release
+
+Your acceptance set on 0.2.31 is noted and I have not reopened any of it. The
+six agent-side sections you asked for are in `docs/kwame-deliverable-agent.md`,
+ready to merge with your gateway sections: endpoint design, agent architecture,
+service and security model, installer and deployment, command reference with exit
+codes, and technician troubleshooting. `OPERATIONS.md` remains the on-call
+runbook and `gateway-contract.md` the exact wire contract.
+
+The two small items are closed in this cut:
+
+1. The folder page's title bar stays "Softafrique Backup Agent Setup", but the
+   heading on the page now reads "Folder to protect". CI reads the compiled
+   `Control` table and fails if that heading is missing or repeats the title
+   bar, so the regression cannot come back silently.
+2. `file_count` is restic's `total_file_count` and counting directories is
+   intended: four files, three subfolders and the snapshot root read 8. The
+   field stays unchanged for schema compatibility. The dashboard label should
+   say "items", and the docs now say so explicitly. A file-only count would
+   need a full `restic ls` walk on every stats refresh; I have not added that
+   cost.
+
+On your outstanding question: yes, the withdrawal endpoint was worth the hour,
+and it is already implemented rather than still pending. It ships in v0.2.32.
+Uninstall calls it before `credentials.dat` is deleted, logs 2xx, 401, 403 and
+offline outcomes, and never fails the uninstall. Reactivation still needs your
+admin call to `/api/v1/admin/device/{device_id}/reenroll`; we have no code path
+that restores credentials locally.
+
+Signing is ready as a switch-on, not enabled. `scripts/sign-windows.ps1` signs
+the two agents and the MSI with SHA-256 and an RFC 3161 timestamp, verifies all
+three with `signtool verify /pa`, and deliberately leaves `restic.exe` alone.
+The tag build uses it when `SOFTAFRIQUE_SIGNING_PFX_BASE64` and
+`SOFTAFRIQUE_SIGNING_PFX_PASSWORD` are configured, and fails loudly if a
+configured certificate cannot sign or verify. It is a cost decision for Kwame,
+not a code change.
+
+For deployments, v0.2.32 is cut as a tag, and the tag build publishes the
+canonical versioned MSI together with `SHA256SUMS` on the GitHub release. The
+checksum is computed from the exact bytes uploaded, after signing when enabled.
+This host cannot build WiX, so the hash is not written into the docs by hand;
+the release asset and its checksum are the source of truth. Pin the tag and
+verify `SHA256SUMS` rather than taking the latest artifact in Actions.

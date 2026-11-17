@@ -9,10 +9,13 @@
     ticket before the files go.
 
     Deleting credentials.dat is mandatory because an uninstalled agent must not
-    leave a usable repository key on a decommissioned or reimaged machine. The
-    repository and every snapshot stay on the server; a restore now needs the
-    escrowed key from the dashboard. Uninstalling does not suspend the device at
-    the gateway, so suspend it separately if the machine is finished.
+    leave a usable repository key on a decommissioned or reimaged machine. Before
+    that, the device withdraws itself at the gateway using those same credentials,
+    so it stops being enrolled. The repository, the escrowed key and every
+    snapshot stay on the server; a restore now needs the escrowed key from the
+    dashboard. A machine being decommissioned is often offline: the withdrawal is
+    logged and the uninstall carries on, and the device can be withdrawn from the
+    dashboard later.
 
     The MSI performs the same cleanup on a standalone uninstall. This script
     repeats it only as a fallback for an interrupted or older package.
@@ -111,6 +114,25 @@ if ($svc) {
     Write-Step 'service was not installed'
 }
 
+# Withdraw while credentials.dat still exists: the gateway endpoint authenticates
+# with the device's own credentials and those are about to be deleted. The agent
+# command is best effort and always exits 0, so an unreachable gateway leaves a
+# line in the log and never fails this job. A direct MSI uninstall makes the same
+# call from its own custom action; doing it here as well covers manual installs
+# and interrupted packages, and the endpoint is idempotent.
+$agentExe = Join-Path $env:ProgramFiles 'Softafrique Backup Agent\SoftafriqueBackupAgent.exe'
+$agentConfig = Join-Path $DataDir 'config.yaml'
+if (Test-Path $agentExe) {
+    try {
+        & $agentExe withdraw -config $agentConfig
+        Write-Step "gateway withdrawal attempt completed (exit $LASTEXITCODE)"
+    } catch {
+        Write-Step "gateway withdrawal could not be attempted; continuing: $($_.Exception.Message)"
+    }
+} else {
+    Write-Step 'no agent executable to withdraw with; continuing with local removal'
+}
+
 # Capture the status before it goes, for the ticket.
 $statusFile = Join-Path $DataDir 'status.json'
 if (Test-Path $statusFile) {
@@ -175,6 +197,6 @@ if (Test-Path $DataDir) {
 } else {
     Write-Step 'no data directory left to remove'
 }
-Write-Step 'the device is still enrolled at the gateway; suspend it from the dashboard if it is decommissioned.'
+Write-Step 'the withdrawal was attempted at the gateway; if it was offline, withdraw the device from the dashboard.'
 
 exit 0

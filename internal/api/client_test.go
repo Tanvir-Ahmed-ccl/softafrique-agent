@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -255,6 +256,91 @@ func TestPostStatusSendsContract(t *testing.T) {
 	}
 	if got["last_duration_seconds"].(float64) != 213.5 {
 		t.Errorf("duration not sent as elapsed seconds: %v", got["last_duration_seconds"])
+	}
+}
+
+func TestWithdrawIsAuthenticatedIdempotentAndHasNoBody(t *testing.T) {
+	calls := 0
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != http.MethodPost || r.URL.Path != "/withdraw" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != testDeviceID || pass != testPassword {
+			t.Errorf("withdraw auth = %q/%q ok=%v, want the device's own credentials", user, pass, ok)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("reading request body: %v", err)
+		}
+		if len(body) != 0 {
+			t.Errorf("withdraw must send no body, got %q", body)
+		}
+		json.NewEncoder(w).Encode(WithdrawResponse{
+			DeviceID:         testDeviceID,
+			Status:           "withdrawn",
+			AlreadyWithdrawn: calls == 2,
+			Note:             "credentials disabled; snapshots and the escrowed key are retained",
+		})
+	}, true)
+
+	first, err := c.Withdraw(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.AlreadyWithdrawn || first.Status != "withdrawn" {
+		t.Errorf("first reply = %+v, want a fresh withdrawal", first)
+	}
+	second, err := c.Withdraw(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.AlreadyWithdrawn {
+		t.Error("a repeat call must report already_withdrawn")
+	}
+	if calls != 2 {
+		t.Errorf("made %d calls, want 2", calls)
+	}
+}
+
+func TestWithdrawErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+		want error
+	}{
+		{"bad credentials", http.StatusUnauthorized, ErrUnauthorized},
+		{"archived device", http.StatusForbidden, ErrRevoked},
+		{"server error", http.StatusInternalServerError, ErrUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.code)
+			}, true)
+			if _, err := c.Withdraw(context.Background()); !errors.Is(err, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestWithdrawWithoutCredentialsDoesNotCallGateway(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("an unauthenticated client must not send a withdraw request")
+	}, false)
+	if _, err := c.Withdraw(context.Background()); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("want ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestWithdrawAcceptsAnEmptySuccessBody(t *testing.T) {
+	c, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}, true)
+	if _, err := c.Withdraw(context.Background()); err != nil {
+		t.Fatalf("a 2xx with no body still withdraws the device: %v", err)
 	}
 }
 
