@@ -56,10 +56,11 @@ func main() { os.Exit(run(os.Args[1:])) }
 
 // runtimeEnv is the resolved environment for a command.
 type runtimeEnv struct {
-	cfg     *config.Config
-	log     *slog.Logger
-	store   *status.Store
-	console bool
+	cfg      *config.Config
+	log      *slog.Logger
+	store    *status.Store
+	console  bool
+	closeLog func()
 }
 
 func run(args []string) int {
@@ -248,11 +249,17 @@ func openEnv(args []string, console bool, extra func(fs *flag.FlagSet) error) (*
 	if err != nil {
 		return nil, fmt.Errorf("could not load %s: %w", *cfgPath, err)
 	}
-	log, err := newLogger(cfg, console || cfg.Verbose)
+	log, closeLog, err := newLogger(cfg, console || cfg.Verbose)
 	if err != nil {
 		return nil, err
 	}
-	return &runtimeEnv{cfg: cfg, log: log, store: status.NewStore(cfg.StatusFile), console: console}, nil
+	return &runtimeEnv{
+		cfg:      cfg,
+		log:      log,
+		store:    status.NewStore(cfg.StatusFile),
+		console:  console,
+		closeLog: closeLog,
+	}, nil
 }
 
 // newLogger writes to the configured log file and, in console mode, to stderr.
@@ -260,17 +267,19 @@ func openEnv(args []string, console bool, extra func(fs *flag.FlagSet) error) (*
 // Timestamps are always UTC. A backup agent that logs local time produces logs
 // that cannot be lined up with gateway records across a DST boundary, which is
 // precisely when somebody is trying to work out what happened at 2am.
-func newLogger(cfg *config.Config, console bool) (*slog.Logger, error) {
+func newLogger(cfg *config.Config, console bool) (*slog.Logger, func(), error) {
 	var writers []io.Writer
+	var closeLog func()
 	if cfg.LogFile != "" {
 		if err := os.MkdirAll(filepath.Dir(cfg.LogFile), 0o755); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 		if err != nil {
-			return nil, fmt.Errorf("could not open the log file: %w", err)
+			return nil, nil, fmt.Errorf("could not open the log file: %w", err)
 		}
 		writers = append(writers, f)
+		closeLog = func() { _ = f.Close() }
 	}
 	if console {
 		writers = append(writers, os.Stderr)
@@ -284,7 +293,7 @@ func newLogger(cfg *config.Config, console bool) (*slog.Logger, error) {
 	}
 	handler := slog.NewTextHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: level})
 	logger := slog.New(&utcHandler{inner: handler})
-	return logger, nil
+	return logger, closeLog, nil
 }
 
 // utcHandler forces UTC on every record's timestamp.
@@ -630,6 +639,12 @@ func cmdWithdraw(args []string) error {
 	env, err := openEnv(args, true, nil)
 	if err != nil {
 		return err
+	}
+	// The uninstall runs this as a short-lived child process. Close the log
+	// explicitly so the file is releasable on Windows before the uninstall
+	// purges it, and so tests can clean up their temporary data directory.
+	if env.closeLog != nil {
+		defer env.closeLog()
 	}
 	ctx, stop := signalCtx()
 	defer stop()
