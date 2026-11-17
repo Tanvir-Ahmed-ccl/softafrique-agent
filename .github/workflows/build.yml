@@ -406,7 +406,7 @@ jobs:
           # its on-page heading must say what the page asks for. A previous
           # build retitled both and left the technician with a heading that
           # described the package rather than the question.
-          $sql = 'SELECT `Text` FROM `Control` WHERE `Dialog_`=''BackupPathDlg'' AND `Control_`=''Title'''
+          $sql = 'SELECT `Text` FROM `Control` WHERE `Dialog_`=''BackupPathDlg'' AND `Control`=''Title'''
           $view = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@($sql))
           $view.GetType().InvokeMember('Execute','InvokeMethod',$null,$view,$null)
           $rec = $view.GetType().InvokeMember('Fetch','InvokeMethod',$null,$view,$null)
