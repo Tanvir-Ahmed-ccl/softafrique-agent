@@ -5,7 +5,7 @@ A Windows service that backs up a customer's folders to an append-only
 them with a key escrowed by our gateway, and reports every attempt back to the
 dashboard.
 
-This is the 0.2.x line, currently 0.2.34. It replaces 0.1.0, which could not be
+This is the 0.2.x line, currently 0.2.35. It replaces 0.1.0, which could not be
 pointed at a real customer safely: it took the repository password as a
 command-line argument, it wrote a second copy of that password into
 `status.json`, it ran `restic init` after any failure to list snapshots, and it
@@ -126,7 +126,7 @@ make test                 # unit tests
 make vet                  # vet, including GOOS=windows
 make build-mac            # developer binary
 make build-windows        # agent.exe + bundled restic.exe
-make msi VERSION=0.2.34   # unsigned pilot MSI (needs wix on PATH)
+make msi VERSION=0.2.35   # unsigned pilot MSI (needs wix on PATH)
 ```
 
 `make build-windows` fetches `restic.exe` once and leaves it in `build/bin`, so

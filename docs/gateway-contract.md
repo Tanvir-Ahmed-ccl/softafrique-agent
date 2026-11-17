@@ -140,7 +140,7 @@ All of this is now confirmed. Two consequences worth writing down:
   "hostname": "DESKTOP-ABC",
   "os_caption": "Windows Server 2019 Standard",
   "backup_path": "D:\\CustomerData",
-  "agent_version": "0.2.34"
+  "agent_version": "0.2.35"
 }
 ```
 
@@ -270,7 +270,7 @@ Sent after every completed attempt, and on the heartbeat timer.
   "bytes_added": 734003200,
   "last_duration_seconds": 41.2,
   "last_backup_error": "",
-  "agent_version": "0.2.34",
+  "agent_version": "0.2.35",
   "os_caption": "Windows Server 2019 Standard"
 }
 ```

@@ -1,7 +1,7 @@
 # Operations runbook
 
 Everything an on-call engineer or a support technician needs. Written for the
-0.2.x line, currently 0.2.34.
+0.2.x line, currently 0.2.35.
 
 ## Where things are
 

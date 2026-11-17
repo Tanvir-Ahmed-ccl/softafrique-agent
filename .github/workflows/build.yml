@@ -810,7 +810,7 @@ jobs:
           fi
           mv "release-assets/SoftafriqueBackupAgent.msi" "release-assets/$asset"
           (cd release-assets && shasum -a 256 "$asset" > SHA256SUMS)
-          cat SHA256SUMS
+          cat release-assets/SHA256SUMS
           {
             echo "Canonical agent MSI for $GITHUB_REF_NAME."
             echo
@@ -828,7 +828,7 @@ jobs:
             echo "certutil -hashfile $asset SHA256"
             echo '```'
             echo
-            echo 'The MSI is unsigned until the signing certificate secrets are configured.'
+            echo 'Signature status is visible in Windows file properties; signing is enabled when the certificate secrets are configured.'
           } > release-assets/RELEASE_NOTES.md
 
       - name: publish the release
