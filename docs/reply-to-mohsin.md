@@ -829,7 +829,7 @@ credential-refresh bug you found explains the 401 during enrollment testing; we
 have not worked around it agent-side, because the fix belongs where the
 credential file is reloaded.
 
-## 13. 0.2.35: the six sections, the two small items and the release
+## 13. 0.2.36: the six sections, the two small items and the release
 
 Your acceptance set on 0.2.31 is noted and I have not reopened any of it. The
 six agent-side sections you asked for are in `docs/kwame-deliverable-agent.md`,
@@ -852,7 +852,7 @@ The two small items are closed in this cut:
    cost.
 
 On your outstanding question: yes, the withdrawal endpoint was worth the hour,
-and it is already implemented rather than still pending. It ships in v0.2.35.
+and it is already implemented rather than still pending. It ships in v0.2.36.
 Uninstall calls it before `credentials.dat` is deleted, logs 2xx, 401, 403 and
 offline outcomes, and never fails the uninstall. Reactivation still needs your
 admin call to `/api/v1/admin/device/{device_id}/reenroll`; we have no code path
@@ -866,15 +866,15 @@ The tag build uses it when `SOFTAFRIQUE_SIGNING_PFX_BASE64` and
 configured certificate cannot sign or verify. It is a cost decision for Kwame,
 not a code change.
 
-For deployments, v0.2.35 is cut as a tag, and the tag build publishes the
+For deployments, v0.2.36 is cut as a tag, and the tag build publishes the
 canonical versioned MSI together with `SHA256SUMS` on the GitHub release. The
 checksum is computed from the exact bytes uploaded, after signing when enabled.
 This host cannot build WiX, so the hash is not written into the docs by hand;
 the release asset and its checksum are the source of truth. Pin the tag and
 verify `SHA256SUMS` rather than taking the latest artifact in Actions.
 
-The first three tags are not the release to deploy. CI caught a Windows-only
+The first four tags are not the release to deploy. CI caught a Windows-only
 test failure where the short-lived `withdraw` command left `agent.log` open, a
-bad column name in the new compiled-UI assertion, and a wrong path in the
-checksum step. All three are fixed; the release was re-cut as 0.2.35 rather than
-moving tags that had already been pushed.
+bad column name in the new compiled-UI assertion, a wrong path in the checksum
+step, and a `gh` call that assumed a checkout. All four are fixed; the release
+was re-cut as 0.2.36 rather than moving tags that had already been pushed.

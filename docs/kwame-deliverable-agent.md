@@ -1,7 +1,7 @@
 # Softafrique Backup Agent — deliverable sections for Kwame
 
 Agent-side sections for the joint client-facing document. Merge these with the
-gateway sections; the agent is complete at **0.2.35**, tag `v0.2.35`.
+gateway sections; the agent is complete at **0.2.36**, tag `v0.2.36`.
 
 The operational runbook is [`OPERATIONS.md`](OPERATIONS.md). The exact wire
 contract is [`gateway-contract.md`](gateway-contract.md); if this summary and the
@@ -39,7 +39,7 @@ Request:
   "hostname": "FILESERVER01",
   "os_caption": "Windows Server 2019 Standard",
   "backup_path": "D:\\CustomerData",
-  "agent_version": "0.2.35"
+  "agent_version": "0.2.36"
 }
 ```
 
@@ -119,7 +119,7 @@ body is exactly nine fields:
   "bytes_added": 734003200,
   "last_duration_seconds": 41.2,
   "last_backup_error": "",
-  "agent_version": "0.2.35",
+  "agent_version": "0.2.36",
   "os_caption": "Windows Server 2019 Standard"
 }
 ```
@@ -464,9 +464,9 @@ hash cannot leave a stale checksum behind.
 
 The canonical artefact is the GitHub release asset for the tag:
 
-- Tag: `v0.2.35`
-- Release: https://github.com/Tanvir-Ahmed-ccl/softafrique-agent/releases/tag/v0.2.35
-- Asset: `SoftafriqueBackupAgent-0.2.35.msi`
+- Tag: `v0.2.36`
+- Release: https://github.com/Tanvir-Ahmed-ccl/softafrique-agent/releases/tag/v0.2.36
+- Asset: `SoftafriqueBackupAgent-0.2.36.msi`
 - Checksum: `SHA256SUMS` on the same release
 
 The tag build publishes the MSI and `SHA256SUMS` from the same job, after signing
